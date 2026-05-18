@@ -1,0 +1,49 @@
+# Unlicense — cochranblock.org
+# Contributors: GotEmCoach, Claude Sonnet 4.6
+
+[package]
+name = "cochranblock-mail-frontend"
+description = "Leptos WASM webmail frontend for cochranblock.org"
+keywords = ["email", "webmail", "leptos", "wasm"]
+categories = ["wasm", "web-programming"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "cochranblock-mail-frontend"
+path = "src/main.rs"
+
+[dependencies]
+shared.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = { version = "0.8" }
+
+gloo-net = "0.7"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "HtmlDocument",
+    "Storage",
+    "HtmlInputElement",
+    "HtmlTextAreaElement",
+    "HtmlElement",
+    "Element",
+    "Event",
+    "KeyboardEvent",
+    "FocusEvent",
+    "InputEvent",
+] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

@@ -1,3 +1,6 @@
-/target
+/target/
+**/*.redb
 .env
-*.redb
+!*.env.example
+frontend/dist/
+

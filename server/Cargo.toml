@@ -1,0 +1,67 @@
+# Unlicense — cochranblock.org
+# Contributors: GotEmCoach, Claude Sonnet 4.6
+
+[package]
+name = "cochranblock-mail"
+description = "Sovereign SMTP/IMAP/HTTP mail server for cochranblock.org. Single binary, zero cloud."
+keywords = ["email", "smtp", "imap", "mail-server", "zero-cloud"]
+categories = ["network-programming", "email"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "cochranblock-mail"
+path = "src/bin/main.rs"
+
+[dependencies]
+shared.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+# TLS
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+rcgen = "0.14"
+
+# HTTP server
+axum = "0.8"
+axum-extra = { version = "0.12", features = ["cookie"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "compression-gzip"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Storage
+redb = "2"
+zstd = "0.13"
+
+# Auth
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+totp-rs = { version = "5", features = ["qr", "gen_secret"] }
+
+# Email parsing
+mailparse = "0.15"
+quoted_printable = "0.5"
+base64 = "0.22"
+
+# Misc
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+dotenvy = "0.15"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+axum-test = "16"

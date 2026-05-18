@@ -1,0 +1,19 @@
+# Unlicense — cochranblock.org
+# Contributors: GotEmCoach, Claude Sonnet 4.6
+
+[package]
+name = "shared"
+description = "Shared API types for cochranblock-mail server and frontend"
+keywords = ["email", "api", "types"]
+categories = ["network-programming", "email"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true

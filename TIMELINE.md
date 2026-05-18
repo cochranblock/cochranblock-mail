@@ -1,0 +1,46 @@
+# Timeline of Invention — cochranblock-mail
+
+## Project: Sovereign SMTP/IMAP/HTTP Mail Server + WASM Webmail
+
+**Author:** Michael Cochran (GotEmCoach)  
+**Domain:** cochranblock.org  
+**License:** Unlicense (public domain)
+
+---
+
+## 2026-05-17 — Initial invention
+
+### Conception
+- Michael Cochran conceived and initiated development of `cochranblock-mail`, a sovereign, zero-cloud email server for `cochranblock.org`.
+- Goal: replace all third-party email infrastructure with a single self-hosted Rust binary — SMTP, IMAP, HTTP webmail, and TOTP MFA in one process.
+
+### Architecture decisions (recorded at time of invention)
+1. **Single binary**: SMTP (port 25/587) + IMAP (993) + HTTP webmail (8080) run concurrently via `tokio::try_join!`.
+2. **Storage**: `redb` embedded key-value database — no Postgres, no SQLite, no external services.
+3. **Message compression**: All RFC 5322 messages stored zstd-compressed. Metadata indexed separately for O(1) inbox listing.
+4. **Authentication**: `argon2id` password hashing (replaces sha2); TOTP via `totp-rs` with QR PNG generation.
+5. **Sessions**: UUID v4 tokens, 24h TTL, stored in redb. Partial sessions (post-password, pre-TOTP) expire after 5 minutes.
+6. **Frontend**: Rust → WASM via Leptos 0.8 (CSR), built with Trunk. Gmail-inspired layout, served by the same HTTP server.
+7. **Multi-user**: Per-user mailboxes with standard folders (INBOX, Sent, Drafts, Trash, Spam). CLI `user add` subcommand for provisioning.
+
+### First working test suite
+- 51 server unit tests across: config, SMTP parsing, IMAP parsing, store/users, store/sessions, store/messages
+- 7 shared type tests (serialization roundtrips, flag bitfield)
+- All 58 tests pass on first merge.
+
+### Workspace crates
+| Crate | Purpose |
+|-------|---------|
+| `cochranblock-mail` (server) | SMTP + IMAP + HTTP server, CLI |
+| `shared` | API types shared between server and WASM frontend |
+| `cochranblock-mail-frontend` | Leptos 0.8 CSR WASM webmail UI |
+
+### Key source files
+- `server/src/store/` — redb schema, user/session/message CRUD
+- `server/src/webmail/auth.rs` — full TOTP MFA flow (setup + verify)
+- `server/src/webmail/mail.rs` — REST mail API
+- `frontend/src/components/` — Leptos UI components (login, inbox, compose, message view)
+
+---
+
+*This document was authored and committed on the date of initial invention to establish provenance.*
