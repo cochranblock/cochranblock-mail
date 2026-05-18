@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use super::{MailStore, StoreError, USERS};
+use super::{enc, dec, MailStore, StoreError, USERS};
 use redb::ReadableTable;
 use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
@@ -78,8 +78,8 @@ impl MailStore {
             if table.get(username)?.is_some() {
                 return Err(StoreError::AlreadyExists(username.to_string()));
             }
-            let serialized = serde_json::to_string(&record)?;
-            table.insert(username, serialized.as_str())?;
+            let serialized = enc(&record)?;
+            table.insert(username, serialized.as_slice())?;
         }
         tx.commit()?;
         Ok(record)
@@ -91,7 +91,7 @@ impl MailStore {
         let val = table
             .get(username)?
             .ok_or_else(|| StoreError::NotFound(username.to_string()))?;
-        Ok(serde_json::from_str(val.value())?)
+        Ok(dec(val.value())?)
     }
 
     pub fn verify_password(&self, username: &str, password: &str) -> Result<bool, StoreError> {
@@ -122,8 +122,8 @@ impl MailStore {
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(USERS)?;
-            let serialized = serde_json::to_string(&user)?;
-            table.insert(username, serialized.as_str())?;
+            let serialized = enc(&user)?;
+            table.insert(username, serialized.as_slice())?;
         }
         tx.commit()?;
         Ok(())
@@ -154,7 +154,7 @@ impl MailStore {
         let mut users = Vec::new();
         for entry in table.iter()? {
             let (_, val) = entry?;
-            users.push(serde_json::from_str::<UserRecord>(val.value())?);
+            users.push(dec::<UserRecord>(val.value())?);
         }
         Ok(users)
     }

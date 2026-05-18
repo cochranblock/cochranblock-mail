@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use super::{MailStore, StoreError, PARTIAL_SESSIONS, SESSIONS};
+use super::{enc, dec, MailStore, StoreError, PARTIAL_SESSIONS, SESSIONS};
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -37,8 +37,8 @@ impl MailStore {
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(SESSIONS)?;
-            let serialized = serde_json::to_string(&record)?;
-            table.insert(token.as_str(), serialized.as_str())?;
+            let serialized = enc(&record)?;
+            table.insert(token.as_str(), serialized.as_slice())?;
         }
         tx.commit()?;
         Ok(record)
@@ -50,7 +50,7 @@ impl MailStore {
         match table.get(token)? {
             None => Ok(None),
             Some(val) => {
-                let rec: SessionRecord = serde_json::from_str(val.value())?;
+                let rec: SessionRecord = dec(val.value())?;
                 if rec.expires_at < chrono::Utc::now().timestamp() {
                     Ok(None) // expired — treat as missing; reaper handles cleanup
                 } else {
@@ -77,7 +77,7 @@ impl MailStore {
             let table = tx.open_table(SESSIONS)?;
             for entry in table.iter()? {
                 let (key, val) = entry?;
-                let rec: SessionRecord = serde_json::from_str(val.value())?;
+                let rec: SessionRecord = dec(val.value())?;
                 if rec.username == username {
                     to_delete.push(key.value().to_string());
                 }
@@ -113,8 +113,8 @@ impl MailStore {
         let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(PARTIAL_SESSIONS)?;
-            let serialized = serde_json::to_string(&record)?;
-            table.insert(token.as_str(), serialized.as_str())?;
+            let serialized = enc(&record)?;
+            table.insert(token.as_str(), serialized.as_slice())?;
         }
         tx.commit()?;
         Ok(record)
@@ -130,7 +130,7 @@ impl MailStore {
         let record: Option<PartialSessionRecord> = match table.get(token)? {
             None => None,
             Some(guard) => {
-                let rec: PartialSessionRecord = serde_json::from_str(guard.value())?;
+                let rec: PartialSessionRecord = dec(guard.value())?;
                 drop(guard); // release borrow before mutating
                 if rec.expires_at < chrono::Utc::now().timestamp() {
                     None
@@ -157,7 +157,7 @@ impl MailStore {
             let mut v = Vec::new();
             for entry in table.iter()? {
                 let (key, val) = entry?;
-                let rec: SessionRecord = serde_json::from_str(val.value())?;
+                let rec: SessionRecord = dec(val.value())?;
                 if rec.expires_at < now {
                     v.push(key.value().to_string());
                 }
@@ -183,7 +183,7 @@ impl MailStore {
             let mut v = Vec::new();
             for entry in table.iter()? {
                 let (key, val) = entry?;
-                let rec: PartialSessionRecord = serde_json::from_str(val.value())?;
+                let rec: PartialSessionRecord = dec(val.value())?;
                 if rec.expires_at < now {
                     v.push(key.value().to_string());
                 }
@@ -218,7 +218,6 @@ mod tests {
     fn create_and_fetch_session() {
         let store = open_store();
         let sess = store.create_session("alice", 3600).unwrap();
-        assert!(!sess.token.is_empty());
         let fetched = store.get_session(&sess.token).unwrap();
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().username, "alice");

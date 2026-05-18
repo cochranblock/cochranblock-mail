@@ -1,5 +1,6 @@
 use crate::api;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 use shared::{FlagUpdate, MessageMeta, flags};
 
@@ -33,9 +34,12 @@ pub fn MessageList(
     let page = RwSignal::new(0u32);
     let navigate = use_navigate();
 
-    let messages_res = Resource::new(
-        move || (mailbox.get(), page.get()),
-        |(mbox, p)| async move { api::list_messages(&mbox, p).await },
+    let messages_res = LocalResource::new(
+        move || {
+            let mbox = mailbox.get();
+            let p = page.get();
+            async move { api::list_messages(&mbox, p).await }
+        },
     );
 
     view! {
@@ -131,7 +135,7 @@ pub fn MessageList(
             </div>
 
             // Pagination
-            {move || messages_res.get().flatten().map(|data| {
+            {move || messages_res.get().and_then(|r| r.ok()).map(|data| {
                 let total_pages = data.total.div_ceil(data.page_size as u64) as u32;
                 view! {
                     <div class="pagination">

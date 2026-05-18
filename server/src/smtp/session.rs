@@ -23,7 +23,6 @@ mod tests {
             tls_key: PathBuf::from("/tmp"),
             mail_dir: PathBuf::from("/tmp"),
             db_path: PathBuf::from("/tmp/test.redb"),
-            frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
             secure_cookies: false,
             totp_encryption_key: None,
@@ -161,22 +160,42 @@ mod tests {
 
     #[tokio::test]
     async fn rset_clears_envelope_before_data() {
+        // Proves RSET actually clears the recipient list by using two distinct local
+        // addresses: the pre-RSET recipient (rseta) must receive nothing, while the
+        // post-RSET recipient (rsetb) receives the one delivered message.
         let (addr, store) = start().await;
         let (mut r, mut w) = connect(addr).await;
         read_line(&mut r).await; // banner
         w.write_all(b"EHLO x\r\n").await.unwrap();
         read_response(&mut r).await;
-        w.write_all(b"MAIL FROM:<a@example.com>\r\n").await.unwrap();
-        read_line(&mut r).await;
-        w.write_all(b"RCPT TO:<rsettest@cochranblock.test>\r\n").await.unwrap();
-        read_line(&mut r).await;
-        w.write_all(b"RSET\r\n").await.unwrap();
-        let rset = read_line(&mut r).await;
-        assert!(rset.starts_with("250"), "RSET: {rset}");
 
-        // No message should have been stored since we RSET before DATA.
-        let (_, total) = store.list_messages("rsettest", "INBOX", 0).unwrap();
-        assert_eq!(total, 0, "RSET should prevent delivery");
+        // First envelope — will be discarded by RSET.
+        w.write_all(b"MAIL FROM:<before@example.com>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RCPT TO:<rseta@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await;
+
+        w.write_all(b"RSET\r\n").await.unwrap();
+        let rset_resp = read_line(&mut r).await;
+        assert!(rset_resp.starts_with("250"), "RSET: {rset_resp}");
+
+        // Second envelope — only this one should result in delivery.
+        w.write_all(b"MAIL FROM:<after@example.com>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RCPT TO:<rsetb@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"DATA\r\n").await.unwrap();
+        read_line(&mut r).await; // 354
+        w.write_all(
+            b"From: after@example.com\r\nSubject: Post-RSET\r\n\r\nBody.\r\n.\r\n",
+        ).await.unwrap();
+        let ok = read_line(&mut r).await;
+        assert!(ok.starts_with("250"), "DATA after RSET: {ok}");
+
+        let (_, alpha_total) = store.list_messages("rseta", "INBOX", 0).unwrap();
+        assert_eq!(alpha_total, 0, "RSET must have cleared the first RCPT TO");
+        let (_, beta_total) = store.list_messages("rsetb", "INBOX", 0).unwrap();
+        assert_eq!(beta_total, 1, "post-RSET delivery must succeed");
     }
 
     #[tokio::test]

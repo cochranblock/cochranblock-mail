@@ -404,7 +404,6 @@ mod tests {
             tls_key: PathBuf::from("/tmp"),
             mail_dir: PathBuf::from("/tmp"),
             db_path: PathBuf::from("/tmp/test.redb"),
-            frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
             secure_cookies: false,
             totp_encryption_key: None,
@@ -586,9 +585,14 @@ mod tests {
 
     #[tokio::test]
     async fn full_enrollment_issues_session_cookie() {
+        // Verify the issued token is actually valid by using it to access a protected route.
         let (server, store) = build_server();
         let token = enroll(&server, &store, "frank").await;
-        assert!(!token.is_empty());
+        server
+            .get("/api/mailboxes")
+            .add_header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .await
+            .assert_status_ok();
     }
 
     // ── totp/verify ────────────────────────────────────────────────────────────

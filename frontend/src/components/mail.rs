@@ -4,6 +4,7 @@ use crate::components::{
 };
 use crate::state::AuthState;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_router::{
     hooks::{use_navigate, use_params_map},
 };
@@ -16,19 +17,21 @@ pub fn MailShell() -> impl IntoView {
 
     // Redirect to login if not authenticated.
     // On mount: check if the session cookie is valid by requesting mailboxes.
-    let auth_check = Resource::new(
-        move || auth.get(),
-        move |state| async move {
-            match state {
-                AuthState::Loading => {
-                    // Try to fetch mailboxes; if it fails with 401 we're not logged in.
-                    match api::list_mailboxes().await {
-                        Ok(_) => Some("ok".to_string()),
-                        Err(_) => None,
+    let auth_check = LocalResource::new(
+        move || {
+            let state = auth.get();
+            async move {
+                match state {
+                    AuthState::Loading => {
+                        // Try to fetch mailboxes; if it fails with 401 we're not logged in.
+                        match api::list_mailboxes().await {
+                            Ok(_) => Some("ok".to_string()),
+                            Err(_) => None,
+                        }
                     }
+                    AuthState::LoggedIn(_) => Some("ok".to_string()),
+                    AuthState::LoggedOut => None,
                 }
-                AuthState::LoggedIn(_) => Some("ok".to_string()),
-                AuthState::LoggedOut => None,
             }
         },
     );

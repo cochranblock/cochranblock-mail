@@ -300,7 +300,6 @@ mod tests {
             tls_key: PathBuf::from("/tmp"),
             mail_dir: PathBuf::from("/tmp"),
             db_path: PathBuf::from("/tmp/test.redb"),
-            frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
             secure_cookies: false,
             totp_encryption_key: None,

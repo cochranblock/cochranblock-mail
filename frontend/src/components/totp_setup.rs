@@ -1,6 +1,7 @@
 use crate::api;
 use crate::state::AuthState;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 
 #[component]
@@ -14,9 +15,11 @@ pub fn TotpSetupPage(partial_token: String) -> impl IntoView {
 
     // Fetch QR code when component mounts.
     let token_for_fetch = partial_token.clone();
-    let setup_data = Resource::new(
-        move || token_for_fetch.clone(),
-        |token| async move { api::totp_setup(&token).await },
+    let setup_data = LocalResource::new(
+        move || {
+            let token = token_for_fetch.clone();
+            async move { api::totp_setup(&token).await }
+        },
     );
 
     let token_for_submit = partial_token.clone();

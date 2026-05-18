@@ -13,32 +13,42 @@ use std::sync::Arc;
 
 // ── Table definitions ─────────────────────────────────────────────────────────
 
-/// Raw RFC 5322 message bytes (zstd-compressed). key = "username/mailbox/uid_hex".
+/// Raw RFC 5322 message bytes (zstd-compressed; tiny messages stored raw). key = "username/mailbox/uid_hex".
 pub(crate) const MESSAGES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("messages");
 
-/// JSON-encoded MessageMeta. key = "username/mailbox/uid_hex".
-pub(crate) const MESSAGE_META: TableDefinition<&str, &str> =
+/// postcard-encoded MessageMeta. key = "username/mailbox/uid_hex".
+pub(crate) const MESSAGE_META: TableDefinition<&str, &[u8]> =
     TableDefinition::new("message_meta");
 
-/// JSON-encoded MailboxState. key = "username/mailboxname".
-pub(crate) const MAILBOXES: TableDefinition<&str, &str> =
+/// postcard-encoded MailboxState. key = "username/mailboxname".
+pub(crate) const MAILBOXES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("mailboxes");
 
-/// JSON-encoded UserRecord. key = username.
-pub(crate) const USERS: TableDefinition<&str, &str> =
+/// postcard-encoded UserRecord. key = username.
+pub(crate) const USERS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("users");
 
-/// JSON-encoded SessionRecord. key = session token (UUID).
-pub(crate) const SESSIONS: TableDefinition<&str, &str> =
+/// postcard-encoded SessionRecord. key = session token (UUID).
+pub(crate) const SESSIONS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("sessions");
 
-/// JSON-encoded SessionRecord for partial (post-password, pre-TOTP) sessions.
-pub(crate) const PARTIAL_SESSIONS: TableDefinition<&str, &str> =
+/// postcard-encoded PartialSessionRecord. key = partial session token.
+pub(crate) const PARTIAL_SESSIONS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("partial_sessions");
 
 /// Ephemeral key-value scratch space (pending TOTP secrets, etc.). key = arbitrary string.
 pub(crate) const SCRATCH: TableDefinition<&str, &str> = TableDefinition::new("scratch");
+
+// ── Codec helpers ─────────────────────────────────────────────────────────────
+
+pub(super) fn enc<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
+    postcard::to_allocvec(v).map_err(StoreError::Codec)
+}
+
+pub(super) fn dec<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
+    postcard::from_bytes(bytes).map_err(StoreError::Codec)
+}
 
 // ── MailStore ────────────────────────────────────────────────────────────────
 

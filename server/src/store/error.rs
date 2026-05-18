@@ -14,8 +14,8 @@ pub enum StoreError {
     Commit(#[from] redb::CommitError),
     #[error("redb storage: {0}")]
     Storage(#[from] redb::StorageError),
-    #[error("json serialization: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("codec: {0}")]
+    Codec(#[from] postcard::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("not found: {0}")]

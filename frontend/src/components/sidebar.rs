@@ -21,9 +21,8 @@ pub fn Sidebar(
     active_mailbox: Signal<String>,
     compose_open: RwSignal<bool>,
 ) -> impl IntoView {
-    let mailboxes = Resource::new(
-        || (),
-        |_| async { api::list_mailboxes().await.unwrap_or_default() },
+    let mailboxes = LocalResource::new(
+        || async { api::list_mailboxes().await.unwrap_or_default() },
     );
 
     view! {

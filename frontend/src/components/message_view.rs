@@ -19,9 +19,12 @@ pub fn MessageView(
     let reply_open = RwSignal::new(false);
     let reply_data = RwSignal::new(Option::<(String, String)>::None); // (to, subject)
 
-    let msg_res = Resource::new(
-        move || (mailbox.get(), uid.get()),
-        |(mbox, uid)| async move { api::get_message(&mbox, uid).await },
+    let msg_res = LocalResource::new(
+        move || {
+            let mbox = mailbox.get();
+            let uid = uid.get();
+            async move { api::get_message(&mbox, uid).await }
+        },
     );
 
     view! {

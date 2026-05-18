@@ -12,8 +12,6 @@ pub struct Config {
     pub tls_key: PathBuf,
     pub mail_dir: PathBuf,
     pub db_path: PathBuf,
-    /// Frontend static assets directory (built by trunk).
-    pub frontend_dist: PathBuf,
     /// Session TTL in seconds (default 86400 = 24h).
     pub session_ttl_secs: i64,
     /// Set Secure flag on session cookie. Disable only for local dev without TLS.
@@ -40,7 +38,6 @@ impl Config {
             tls_key: PathBuf::from(env_or("TLS_KEY", "/etc/cochranblock-mail/key.pem")),
             mail_dir: PathBuf::from(env_or("MAIL_DIR", "/var/lib/cochranblock-mail/messages")),
             db_path: PathBuf::from(env_or("MAIL_DB", "/var/lib/cochranblock-mail/mail.redb")),
-            frontend_dist: PathBuf::from(env_or("FRONTEND_DIST", "frontend/dist")),
             session_ttl_secs: env_or("SESSION_TTL_SECS", "86400").parse().unwrap_or(86400),
             secure_cookies: env_or("SESSION_SECURE_COOKIE", "true")
                 .parse()

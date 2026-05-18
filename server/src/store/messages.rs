@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use super::{MailStore, StoreError, MAILBOXES, MESSAGE_META, MESSAGES};
+use super::{enc, dec, MailStore, StoreError, MAILBOXES, MESSAGE_META, MESSAGES};
 use redb::ReadableTable;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -54,8 +54,8 @@ impl MailStore {
             {
                 let mut table = tx.open_table(MAILBOXES)?;
                 if table.get(key.as_str())?.is_none() {
-                    let state = serde_json::to_string(&MailboxState::default())?;
-                    table.insert(key.as_str(), state.as_str())?;
+                    let state = enc(&MailboxState::default())?;
+                    table.insert(key.as_str(), state.as_slice())?;
                 }
             }
             tx.commit()?;
@@ -72,7 +72,7 @@ impl MailStore {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(MAILBOXES)?;
         match table.get(key.as_str())? {
-            Some(val) => Ok(serde_json::from_str(val.value())?),
+            Some(val) => Ok(dec(val.value())?),
             None => Ok(MailboxState::default()),
         }
     }
@@ -89,7 +89,7 @@ impl MailStore {
             let (key, val) = entry?;
             if key.value().starts_with(&prefix) {
                 let mailbox_name = key.value()[prefix.len()..].to_string();
-                let state: MailboxState = serde_json::from_str(val.value())?;
+                let state: MailboxState = dec(val.value())?;
                 result.push((mailbox_name, state));
             }
         }
@@ -112,7 +112,7 @@ impl MailStore {
         let uid = {
             let mut mbox_table = tx.open_table(MAILBOXES)?;
             let mut state: MailboxState = match mbox_table.get(mbox_key.as_str())? {
-                Some(v) => serde_json::from_str(v.value())?,
+                Some(v) => dec(v.value())?,
                 None => MailboxState::default(),
             };
             let uid = state.uid_next;
@@ -121,13 +121,17 @@ impl MailStore {
             if meta.flags & flags::SEEN == 0 {
                 state.unread_count += 1;
             }
-            let state_str = serde_json::to_string(&state)?;
-            mbox_table.insert(mbox_key.as_str(), state_str.as_str())?;
+            let state_bytes = enc(&state)?;
+            mbox_table.insert(mbox_key.as_str(), state_bytes.as_slice())?;
             uid
         };
 
         let msg_key = message_key(username, mailbox, uid);
-        let compressed = zstd::encode_all(raw, 3).unwrap_or_else(|_| raw.to_vec());
+        // Skip compression when it wouldn't shrink the message (common for tiny emails).
+        let compressed = zstd::encode_all(raw, 3)
+            .ok()
+            .filter(|c| c.len() < raw.len())
+            .unwrap_or_else(|| raw.to_vec());
 
         {
             let mut msg_table = tx.open_table(MESSAGES)?;
@@ -147,8 +151,8 @@ impl MailStore {
         };
         {
             let mut meta_table = tx.open_table(MESSAGE_META)?;
-            let meta_str = serde_json::to_string(&full_meta)?;
-            meta_table.insert(msg_key.as_str(), meta_str.as_str())?;
+            let meta_bytes = enc(&full_meta)?;
+            meta_table.insert(msg_key.as_str(), meta_bytes.as_slice())?;
         }
 
         tx.commit()?;
@@ -186,7 +190,7 @@ impl MailStore {
         let table = tx.open_table(MESSAGE_META)?;
         match table.get(key.as_str())? {
             None => Ok(None),
-            Some(v) => Ok(Some(serde_json::from_str(v.value())?)),
+            Some(v) => Ok(Some(dec(v.value())?)),
         }
     }
 
@@ -205,7 +209,7 @@ impl MailStore {
         for entry in table.iter()? {
             let (key, val) = entry?;
             if key.value().starts_with(&prefix) {
-                let meta: shared::MessageMeta = serde_json::from_str(val.value())?;
+                let meta: shared::MessageMeta = dec(val.value())?;
                 if !meta.is_deleted() {
                     all.push(meta);
                 }
@@ -219,6 +223,86 @@ impl MailStore {
         let start = (page as usize) * (PAGE_SIZE as usize);
         let page_msgs = all.into_iter().skip(start).take(PAGE_SIZE as usize).collect();
         Ok((page_msgs, total))
+    }
+
+    /// Returns all non-deleted UIDs in a mailbox, sorted ascending (seq 1 = oldest).
+    pub fn list_uids_asc(&self, username: &str, mailbox: &str) -> Result<Vec<u64>, StoreError> {
+        let prefix = format!("{username}/{mailbox}/");
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(MESSAGE_META)?;
+        let mut uids = Vec::new();
+        for entry in table.iter()? {
+            let (key, val) = entry?;
+            if key.value().starts_with(&prefix) {
+                let meta: shared::MessageMeta = dec(val.value())?;
+                // \Deleted messages keep their sequence number until EXPUNGE.
+                uids.push(meta.uid);
+            }
+        }
+        uids.sort_unstable();
+        Ok(uids)
+    }
+
+    /// Permanently remove all messages with `\Deleted` flag from the mailbox.
+    /// Returns their UIDs sorted ascending (callers send `* N EXPUNGE` in reverse).
+    pub fn expunge_deleted(&self, username: &str, mailbox: &str) -> Result<Vec<u64>, StoreError> {
+        let prefix = format!("{username}/{mailbox}/");
+        let mbox_key = mailbox_key(username, mailbox);
+
+        // Phase 1 — collect keys to delete (read-only; no write transaction yet).
+        let to_delete: Vec<(String, bool)> = {
+            let rtx = self.db.begin_read()?;
+            let rtable = rtx.open_table(MESSAGE_META)?;
+            let mut v = Vec::new();
+            for entry in rtable.iter()? {
+                let (key, val) = entry?;
+                if key.value().starts_with(&prefix) {
+                    let meta: shared::MessageMeta = dec(val.value())?;
+                    if meta.is_deleted() {
+                        v.push((key.value().to_string(), meta.is_seen()));
+                    }
+                }
+            }
+            v
+        };
+
+        if to_delete.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Phase 2 — delete them in a single write transaction.
+        let mut expunged = Vec::new();
+        let tx = self.db.begin_write()?;
+        {
+            let mut meta_table = tx.open_table(MESSAGE_META)?;
+            let mut msg_table = tx.open_table(MESSAGES)?;
+
+            for (key, _was_seen) in &to_delete {
+                if let Some(uid_hex) = key.split('/').last() {
+                    if let Ok(uid) = u64::from_str_radix(uid_hex, 16) {
+                        expunged.push(uid);
+                    }
+                }
+                meta_table.remove(key.as_str())?;
+                msg_table.remove(key.as_str())?;
+            }
+
+            // Update mailbox state counts.
+            let mut mbox_table = tx.open_table(MAILBOXES)?;
+            let stored = mbox_table.get(mbox_key.as_str())?.map(|v| v.value().to_vec());
+            if let Some(stored) = stored {
+                let mut state: MailboxState = dec(&stored)?;
+                let n = to_delete.len() as u64;
+                let unread_removed = to_delete.iter().filter(|(_, was_seen)| !was_seen).count() as u64;
+                state.message_count = state.message_count.saturating_sub(n);
+                state.unread_count = state.unread_count.saturating_sub(unread_removed);
+                let updated = enc(&state)?;
+                mbox_table.insert(mbox_key.as_str(), updated.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        expunged.sort_unstable();
+        Ok(expunged)
     }
 
     // ── Flag updates ──────────────────────────────────────────────────────────
@@ -238,11 +322,11 @@ impl MailStore {
             // Open once as mutable. Read into owned String immediately so we can
             // call insert() on the same table handle without a borrow conflict.
             let mut meta_table = tx.open_table(MESSAGE_META)?;
-            let existing_json = meta_table
+            let existing_bytes = meta_table
                 .get(key.as_str())?
-                .map(|v| v.value().to_string())
+                .map(|v| v.value().to_vec())
                 .ok_or_else(|| StoreError::NotFound(key.clone()))?;
-            let mut meta: shared::MessageMeta = serde_json::from_str(&existing_json)?;
+            let mut meta: shared::MessageMeta = dec(&existing_bytes)?;
             let was_seen = meta.is_seen();
 
             if let Some(s) = seen {
@@ -256,27 +340,25 @@ impl MailStore {
             }
 
             let new_seen = meta.is_seen();
-            let meta_str = serde_json::to_string(&meta)?;
-            meta_table.insert(key.as_str(), meta_str.as_str())?;
+            let meta_bytes = enc(&meta)?;
+            meta_table.insert(key.as_str(), meta_bytes.as_slice())?;
 
             // Keep mailbox unread count in sync.
             if was_seen != new_seen {
                 let mbox_key = mailbox_key(username, mailbox);
                 let mut mbox_table = tx.open_table(MAILBOXES)?;
-                // Read existing state, clone to owned string, then drop the borrow
-                // before calling insert() to avoid overlapping borrows.
-                let existing_json: Option<String> = mbox_table
+                let existing_bytes: Option<Vec<u8>> = mbox_table
                     .get(mbox_key.as_str())?
-                    .map(|v| v.value().to_string());
-                if let Some(json) = existing_json {
-                    let mut state: MailboxState = serde_json::from_str(&json)?;
+                    .map(|v| v.value().to_vec());
+                if let Some(bytes) = existing_bytes {
+                    let mut state: MailboxState = dec(&bytes)?;
                     if new_seen && state.unread_count > 0 {
                         state.unread_count -= 1;
                     } else if !new_seen {
                         state.unread_count += 1;
                     }
-                    let state_str = serde_json::to_string(&state)?;
-                    mbox_table.insert(mbox_key.as_str(), state_str.as_str())?;
+                    let state_bytes = enc(&state)?;
+                    mbox_table.insert(mbox_key.as_str(), state_bytes.as_slice())?;
                 }
             }
         }
@@ -412,16 +494,21 @@ This is the body of the email.\r\n";
     #[test]
     fn list_messages_newest_first() {
         let store = open_store();
-        for _ in 0..3 {
-            store.deliver("alice", "INBOX", TEST_MSG).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        // Deliver messages with out-of-UID-order dates so the test actually exercises
+        // date-based sorting rather than trivially passing via UID order.
+        let make = |date: &str| -> Vec<u8> {
+            format!("From: x@x.com\r\nSubject: s\r\nDate: {date}\r\n\r\nBody\r\n").into_bytes()
+        };
+        store.deliver("alice", "INBOX", &make("Mon, 01 Jan 2024 00:00:00 +0000")).unwrap(); // uid 1
+        store.deliver("alice", "INBOX", &make("Fri, 01 Mar 2024 00:00:00 +0000")).unwrap(); // uid 2
+        store.deliver("alice", "INBOX", &make("Thu, 01 Feb 2024 00:00:00 +0000")).unwrap(); // uid 3
         let (msgs, total) = store.list_messages("alice", "INBOX", 0).unwrap();
         assert_eq!(total, 3);
         assert_eq!(msgs.len(), 3);
-        // highest uid = most recently delivered = newest
-        assert!(msgs[0].uid >= msgs[1].uid);
-        assert!(msgs[1].uid >= msgs[2].uid);
+        // Date order: Mar(uid 2) > Feb(uid 3) > Jan(uid 1) — differs from UID order
+        assert_eq!(msgs[0].uid, 2, "newest-by-date (Mar) first: {msgs:?}");
+        assert_eq!(msgs[1].uid, 3, "middle-by-date (Feb) second: {msgs:?}");
+        assert_eq!(msgs[2].uid, 1, "oldest-by-date (Jan) last: {msgs:?}");
     }
 
     #[test]
@@ -465,6 +552,17 @@ This is the body of the email.\r\n";
         // total reflects non-deleted visible messages
         assert_eq!(msgs.len(), 1);
         assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn list_uids_asc_includes_deleted() {
+        // RFC 3501: \Deleted messages keep their sequence number until EXPUNGE.
+        let store = open_store();
+        store.deliver("alice", "INBOX", TEST_MSG).unwrap(); // uid 1
+        store.deliver("alice", "INBOX", TEST_MSG).unwrap(); // uid 2
+        store.update_flags("alice", "INBOX", 1, None, None, Some(true)).unwrap();
+        let uids = store.list_uids_asc("alice", "INBOX").unwrap();
+        assert_eq!(uids, vec![1, 2], "\\Deleted messages must retain seq number until EXPUNGE");
     }
 
     #[test]

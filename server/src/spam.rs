@@ -425,45 +425,46 @@ mod tests {
 
     #[test]
     fn spam_headers_contains_yes_for_spam() {
-        let result = SpamResult {
-            verdict: Verdict::Spam,
-            score: 7.5,
-            rules: vec!["SUBJECT_ALL_CAPS", "MISSING_DATE"],
-        };
+        // Use check() so verdict/score come from real production logic, not hand-constructed structs.
+        // MISSING_FROM(3.0)+MISSING_DATE(1.5)+MISSING_MSGID(1.5) = 6.0 → Spam
+        let raw = msg("Subject: hi", "hello");
+        let result = check(&raw, "example.com", 1, false);
         let h = spam_headers(&result);
-        assert!(h.contains("X-Spam-Status: Yes"));
-        assert!(h.contains("X-Spam-Score: 7.50"));
-        assert!(h.contains("SUBJECT_ALL_CAPS"));
+        assert!(h.contains("X-Spam-Status: Yes"), "headers: {h}");
+        assert!(h.contains("X-Spam-Score: 6.00"), "score format: {h}");
+        assert!(h.contains("MISSING_FROM"), "rule name in headers: {h}");
     }
 
     #[test]
     fn spam_headers_contains_no_for_ham() {
-        let result = SpamResult { verdict: Verdict::Ham, score: 1.0, rules: vec![] };
+        let raw = msg(&full_headers("Hello from a friend"), "Hi there");
+        let result = check(&raw, "example.com", 1, false);
         let h = spam_headers(&result);
-        assert!(h.contains("X-Spam-Status: No"));
+        assert!(h.contains("X-Spam-Status: No"), "headers: {h}");
+        assert!(h.contains("X-Spam-Score: 0.00"), "score format: {h}");
     }
 
     // ── Score threshold ──────────────────────────────────────────────────────
 
     #[test]
     fn score_just_below_threshold_is_ham() {
-        // Manually construct a result just below the threshold.
-        let r = SpamResult {
-            verdict: if 4.9 >= SPAM_THRESHOLD { Verdict::Spam } else { Verdict::Ham },
-            score: 4.9,
-            rules: vec![],
-        };
-        assert_eq!(r.verdict, Verdict::Ham);
+        // MISSING_FROM(3.0) + MISSING_DATE(1.5) = 4.5 < SPAM_THRESHOLD(5.0)
+        let raw = msg("Message-ID: <x>\r\nSubject: Hello", "hi");
+        let r = check(&raw, "example.com", 1, false);
+        assert!(r.score < SPAM_THRESHOLD, "score {} should be below threshold {}", r.score, SPAM_THRESHOLD);
+        assert_eq!(r.verdict, Verdict::Ham, "rules: {:?}", r.rules);
     }
 
     #[test]
     fn score_at_threshold_is_spam() {
-        let r = SpamResult {
-            verdict: if SPAM_THRESHOLD >= SPAM_THRESHOLD { Verdict::Spam } else { Verdict::Ham },
-            score: SPAM_THRESHOLD,
-            rules: vec![],
-        };
-        assert_eq!(r.verdict, Verdict::Spam);
+        // MISSING_FROM(3.0) + SUBJECT_ALL_CAPS(2.0) = 5.0 == SPAM_THRESHOLD → Spam
+        let raw = msg(
+            "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <x>\r\nSubject: WIN NOW",
+            "hi",
+        );
+        let r = check(&raw, "example.com", 1, false);
+        assert!(r.score >= SPAM_THRESHOLD, "score {} should be at threshold {}", r.score, SPAM_THRESHOLD);
+        assert_eq!(r.verdict, Verdict::Spam, "rules: {:?}", r.rules);
     }
 
     // ── Leet normalization ───────────────────────────────────────────────────

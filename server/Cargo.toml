@@ -45,12 +45,15 @@ rcgen = "0.14"
 # HTTP server
 axum = "0.8"
 axum-extra = { version = "0.12", features = ["cookie"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "compression-gzip"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
 tower = { version = "0.5", features = ["util"] }
 
 # Storage
 redb = "2"
 zstd = "0.13"
+postcard = { version = "1", features = ["alloc"] }
 
 # Auth
 argon2 = "0.5"
