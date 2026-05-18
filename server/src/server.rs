@@ -31,6 +31,24 @@ impl Server {
         tracing::info!("IMAP listening on :{}", config.imap_port);
         tracing::info!("HTTP webmail on :{}", config.http_port);
 
+        // Prune expired sessions every hour so the database doesn't grow unboundedly.
+        let reaper = Arc::clone(&store);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                match reaper.prune_expired_sessions() {
+                    Ok(n) if n > 0 => tracing::debug!(n, "pruned expired sessions"),
+                    Err(e) => tracing::warn!("session reaper: {e}"),
+                    _ => {}
+                }
+                match reaper.prune_expired_partial_sessions() {
+                    Ok(n) if n > 0 => tracing::debug!(n, "pruned expired partial sessions"),
+                    Err(e) => tracing::warn!("partial session reaper: {e}"),
+                    _ => {}
+                }
+            }
+        });
+
         tokio::try_join!(
             smtp.listen(),
             imap.listen(),

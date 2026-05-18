@@ -394,6 +394,7 @@ mod tests {
             db_path: PathBuf::from("/tmp/test.redb"),
             frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
+            secure_cookies: false,
         })
     }
 
@@ -694,6 +695,7 @@ async fn issue_session(
     let cookie = Cookie::build((SESSION_COOKIE, sess.token))
         .http_only(true)
         .same_site(SameSite::Strict)
+        .secure(state.config.secure_cookies)
         .path("/")
         .build();
 

@@ -162,24 +162,29 @@ pub async fn send_message(
     let date = chrono::Utc::now().to_rfc2822();
     let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), domain);
 
+    // Sanitize all user-controlled header fields against CRLF injection.
+    let subject = sanitize_header(&body.subject);
+    let to_addrs = body.to.iter().map(|a| sanitize_header(a)).collect::<Vec<_>>().join(", ");
     let in_reply_to_header = body
         .in_reply_to
         .as_ref()
-        .map(|id| format!("In-Reply-To: {id}\r\nReferences: {id}\r\n"))
+        .map(|id| {
+            let id = sanitize_header(id);
+            format!("In-Reply-To: {id}\r\nReferences: {id}\r\n")
+        })
         .unwrap_or_default();
 
     let cc_header = if body.cc.is_empty() {
         String::new()
     } else {
-        format!("Cc: {}\r\n", body.cc.join(", "))
+        let cc = body.cc.iter().map(|a| sanitize_header(a)).collect::<Vec<_>>().join(", ");
+        format!("Cc: {cc}\r\n")
     };
 
     let raw = format!(
-        "From: {from}\r\nTo: {to}\r\n{cc_header}Subject: {subject}\r\nDate: {date}\r\n\
+        "From: {from}\r\nTo: {to_addrs}\r\n{cc_header}Subject: {subject}\r\nDate: {date}\r\n\
          Message-ID: {message_id}\r\nMIME-Version: 1.0\r\n\
          Content-Type: text/plain; charset=utf-8\r\n{in_reply_to_header}\r\n{body_text}\r\n",
-        to = body.to.join(", "),
-        subject = body.subject,
         body_text = body.body,
     );
 
@@ -247,6 +252,14 @@ pub async fn update_flags(
     }
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Strip CR and LF from a value destined for an RFC 5322 header field,
+/// preventing header-injection attacks.
+fn sanitize_header(value: &str) -> String {
+    value.chars().filter(|&c| c != '\r' && c != '\n').collect()
+}
+
 // ── Body extraction helpers ───────────────────────────────────────────────────
 
 fn extract_bodies(raw: &[u8]) -> (String, Option<String>) {
@@ -289,6 +302,7 @@ mod tests {
             db_path: PathBuf::from("/tmp/test.redb"),
             frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
+            secure_cookies: false,
         })
     }
 

@@ -25,6 +25,7 @@ mod tests {
             db_path: PathBuf::from("/tmp/test.redb"),
             frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
+            secure_cookies: false,
         })
     }
 
@@ -189,6 +190,7 @@ pub struct SmtpSession {
     peer: SocketAddr,
     config: Arc<Config>,
     store: Arc<MailStore>,
+    greeted: bool,
     mail_from: Option<String>,
     rcpt_to: Vec<String>,
 }
@@ -200,7 +202,7 @@ impl SmtpSession {
         config: Arc<Config>,
         store: Arc<MailStore>,
     ) -> Self {
-        Self { stream, peer, config, store, mail_from: None, rcpt_to: Vec::new() }
+        Self { stream, peer, config, store, greeted: false, mail_from: None, rcpt_to: Vec::new() }
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
@@ -218,6 +220,7 @@ impl SmtpSession {
             match SmtpCommand::parse(&line) {
                 SmtpCommand::Ehlo(host) => {
                     tracing::info!(peer = %self.peer, "EHLO {host}");
+                    self.greeted = true;
                     writer
                         .write_all(
                             format!(
@@ -230,11 +233,16 @@ impl SmtpSession {
                 }
                 SmtpCommand::Helo(host) => {
                     tracing::info!(peer = %self.peer, "HELO {host}");
+                    self.greeted = true;
                     writer
                         .write_all(format!("250 {}\r\n", self.config.domain).as_bytes())
                         .await?;
                 }
                 SmtpCommand::MailFrom(addr) => {
+                    if !self.greeted {
+                        writer.write_all(b"503 5.5.1 EHLO/HELO required\r\n").await?;
+                        continue;
+                    }
                     self.mail_from = Some(addr);
                     self.rcpt_to.clear();
                     writer.write_all(b"250 2.1.0 Ok\r\n").await?;

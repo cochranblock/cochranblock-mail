@@ -125,27 +125,80 @@ impl MailStore {
         token: &str,
     ) -> Result<Option<PartialSessionRecord>, StoreError> {
         let tx = self.db.begin_write()?;
-        let record = {
-            let table = tx.open_table(PARTIAL_SESSIONS)?;
-            match table.get(token)? {
-                None => None,
-                Some(val) => {
-                    let rec: PartialSessionRecord = serde_json::from_str(val.value())?;
-                    if rec.expires_at < chrono::Utc::now().timestamp() {
-                        None // expired
-                    } else {
-                        Some(rec)
-                    }
+        // Open once as mutable; read into owned value then delete in the same handle.
+        let mut table = tx.open_table(PARTIAL_SESSIONS)?;
+        let record: Option<PartialSessionRecord> = match table.get(token)? {
+            None => None,
+            Some(guard) => {
+                let rec: PartialSessionRecord = serde_json::from_str(guard.value())?;
+                drop(guard); // release borrow before mutating
+                if rec.expires_at < chrono::Utc::now().timestamp() {
+                    None
+                } else {
+                    Some(rec)
                 }
             }
         };
         if record.is_some() {
-            // consume — single use
-            let mut table = tx.open_table(PARTIAL_SESSIONS)?;
             table.remove(token)?;
         }
+        drop(table);
         tx.commit()?;
         Ok(record)
+    }
+
+    // ── Expired session cleanup ───────────────────────────────────────────────
+
+    pub fn prune_expired_sessions(&self) -> Result<usize, StoreError> {
+        let now = chrono::Utc::now().timestamp();
+        let tx = self.db.begin_write()?;
+        let expired: Vec<String> = {
+            let table = tx.open_table(SESSIONS)?;
+            let mut v = Vec::new();
+            for entry in table.iter()? {
+                let (key, val) = entry?;
+                let rec: SessionRecord = serde_json::from_str(val.value())?;
+                if rec.expires_at < now {
+                    v.push(key.value().to_string());
+                }
+            }
+            v
+        };
+        let count = expired.len();
+        if count > 0 {
+            let mut table = tx.open_table(SESSIONS)?;
+            for token in &expired {
+                table.remove(token.as_str())?;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    pub fn prune_expired_partial_sessions(&self) -> Result<usize, StoreError> {
+        let now = chrono::Utc::now().timestamp();
+        let tx = self.db.begin_write()?;
+        let expired: Vec<String> = {
+            let table = tx.open_table(PARTIAL_SESSIONS)?;
+            let mut v = Vec::new();
+            for entry in table.iter()? {
+                let (key, val) = entry?;
+                let rec: PartialSessionRecord = serde_json::from_str(val.value())?;
+                if rec.expires_at < now {
+                    v.push(key.value().to_string());
+                }
+            }
+            v
+        };
+        let count = expired.len();
+        if count > 0 {
+            let mut table = tx.open_table(PARTIAL_SESSIONS)?;
+            for token in &expired {
+                table.remove(token.as_str())?;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
     }
 }
 

@@ -105,7 +105,7 @@ impl MailStore {
         mailbox: &str,
         raw: &[u8],
     ) -> Result<u64, StoreError> {
-        let meta = extract_meta(username, mailbox, raw);
+        let meta = extract_meta(raw);
         let mbox_key = mailbox_key(username, mailbox);
 
         let tx = self.db.begin_write()?;
@@ -296,8 +296,7 @@ struct RawMeta {
     snippet: String,
 }
 
-fn extract_meta(username: &str, mailbox: &str, raw: &[u8]) -> RawMeta {
-    let _ = (username, mailbox); // may be used for future per-mailbox defaults
+fn extract_meta(raw: &[u8]) -> RawMeta {
     let parsed = mailparse::parse_mail(raw);
     match parsed {
         Ok(msg) => {

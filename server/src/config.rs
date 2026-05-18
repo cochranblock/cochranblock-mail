@@ -16,6 +16,8 @@ pub struct Config {
     pub frontend_dist: PathBuf,
     /// Session TTL in seconds (default 86400 = 24h).
     pub session_ttl_secs: i64,
+    /// Set Secure flag on session cookie. Disable only for local dev without TLS.
+    pub secure_cookies: bool,
 }
 
 #[derive(Debug, Error)]
@@ -38,6 +40,9 @@ impl Config {
             db_path: PathBuf::from(env_or("MAIL_DB", "/var/lib/cochranblock-mail/mail.redb")),
             frontend_dist: PathBuf::from(env_or("FRONTEND_DIST", "frontend/dist")),
             session_ttl_secs: env_or("SESSION_TTL_SECS", "86400").parse().unwrap_or(86400),
+            secure_cookies: env_or("SESSION_SECURE_COOKIE", "true")
+                .parse()
+                .unwrap_or(true),
         })
     }
 }

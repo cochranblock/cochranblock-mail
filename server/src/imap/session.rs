@@ -22,6 +22,7 @@ mod tests {
             db_path: PathBuf::from("/tmp/test.redb"),
             frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
+            secure_cookies: false,
         })
     }
 
