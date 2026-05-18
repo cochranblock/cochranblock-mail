@@ -32,12 +32,15 @@ impl ImapSession {
 
     pub async fn run(self) -> anyhow::Result<()> {
         let (reader, mut writer) = self.stream.into_split();
-        writer.write_all(b"* OK cochranblock-mail IMAP4rev1 ready\r\n").await?;
+        writer
+            .write_all(
+                format!("* OK {} IMAP4rev1 ready\r\n", self.config.domain).as_bytes(),
+            )
+            .await?;
 
         let mut lines = BufReader::new(reader).lines();
         let peer = self.peer;
         let store = Arc::clone(&self.store);
-        let domain = self.config.domain.clone();
         let mut state = State::NotAuthenticated;
 
         while let Some(line) = lines.next_line().await? {

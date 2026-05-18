@@ -17,6 +17,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run quality gate: clippy + tests + release build check.
+    Test,
     /// Manage user accounts.
     User {
         #[command(subcommand)]
@@ -57,6 +59,16 @@ async fn main() -> anyhow::Result<()> {
                 "cochranblock-mail starting"
             );
             Server::new(config).run().await
+        }
+
+        Some(Cmd::Test) => {
+            #[cfg(feature = "tests")]
+            return cochranblock_mail::run_tests();
+            #[cfg(not(feature = "tests"))]
+            anyhow::bail!(
+                "rebuild with --features tests to use this subcommand, \
+                 or run `cochranblock-mail-test` directly"
+            )
         }
 
         Some(Cmd::User { action }) => {

@@ -1,4 +1,3 @@
-use crate::store::MailStore;
 use crate::webmail::session::{AppState, AuthUser};
 use axum::{
     Json,
@@ -8,8 +7,7 @@ use axum::{
 };
 use mailparse::parse_mail;
 use serde::Deserialize;
-use shared::{ApiError, FlagUpdate, MailboxInfo, MessageFull, MessagesPage, SendRequest, flags};
-use std::sync::Arc;
+use shared::{ApiError, FlagUpdate, MailboxInfo, MessageFull, MessagesPage, SendRequest};
 
 // ── GET /api/mailboxes ────────────────────────────────────────────────────────
 
@@ -186,7 +184,7 @@ pub async fn send_message(
     );
 
     // Deliver a copy to Sent.
-    if let Err(_) = state.store.deliver(&user.username, "Sent", raw.as_bytes()) {
+    if state.store.deliver(&user.username, "Sent", raw.as_bytes()).is_err() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError::new("store_error", "failed to save sent message")),

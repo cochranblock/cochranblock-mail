@@ -79,11 +79,7 @@ impl SmtpSession {
                             break;
                         }
                         // RFC 5321 §4.5.2: un-stuff leading dots.
-                        let line_bytes = if data_line.starts_with('.') {
-                            &data_line[1..]
-                        } else {
-                            &data_line
-                        };
+                        let line_bytes = data_line.strip_prefix('.').unwrap_or(&data_line);
                         body.extend_from_slice(line_bytes.as_bytes());
                         body.extend_from_slice(b"\r\n");
                     }

@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use super::{MailStore, StoreError, USERS};
 use redb::ReadableTable;
 use argon2::{

@@ -17,6 +17,14 @@ homepage.workspace = true
 name = "cochranblock-mail"
 path = "src/bin/main.rs"
 
+[[bin]]
+name = "cochranblock-mail-test"
+path = "src/bin/cochranblock_mail_test.rs"
+required-features = ["tests"]
+
+[features]
+tests = []
+
 [dependencies]
 shared = { package = "cochranblock-mail-shared", path = "../shared", version = "0.1" }
 serde.workspace = true

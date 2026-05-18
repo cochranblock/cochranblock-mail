@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use super::{MailStore, StoreError, PARTIAL_SESSIONS, SESSIONS};
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};

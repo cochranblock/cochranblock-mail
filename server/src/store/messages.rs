@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use super::{MailStore, StoreError, MAILBOXES, MESSAGE_META, MESSAGES};
 use redb::ReadableTable;
 use chrono::{DateTime, Utc};

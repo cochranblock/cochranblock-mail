@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 mod error;
 pub mod messages;
 pub mod sessions;
@@ -5,7 +7,7 @@ pub mod users;
 
 pub use error::StoreError;
 
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
 

@@ -1,5 +1,3 @@
-use crate::config::Config;
-use crate::store::MailStore;
 use crate::webmail::session::{AppState, AuthUser, SESSION_COOKIE};
 use axum::{
     Json,
@@ -12,7 +10,6 @@ use axum_extra::extract::CookieJar;
 use shared::{
     ApiError, AuthSuccess, LoginRequest, LoginResponse, TotpSetupResponse, TotpVerifyRequest,
 };
-use std::sync::Arc;
 use totp_rs::{Algorithm, Secret, TOTP};
 
 // ── TOTP helpers ──────────────────────────────────────────────────────────────
@@ -181,7 +178,7 @@ pub async fn totp_setup(
     // Actually cleanest: store the secret directly in the partial session.
     // Let's encode it as username+"__pending_secret__" in a dedicated store call.
     let pending_key = format!("__pending_totp__/{}", new_partial.token);
-    if let Err(_) = state.store.set_pending_totp_secret(&pending_key, &secret_base32) {
+    if state.store.set_pending_totp_secret(&pending_key, &secret_base32).is_err() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError::new("store_error", "internal error")),
@@ -266,7 +263,7 @@ pub async fn totp_confirm(
     }
 
     // Enroll the secret permanently.
-    if let Err(_) = state.store.set_totp_secret(&partial.username, &secret_base32) {
+    if state.store.set_totp_secret(&partial.username, &secret_base32).is_err() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError::new("store_error", "failed to save TOTP secret")),
@@ -361,7 +358,7 @@ pub async fn totp_verify(
 
 pub async fn logout(
     State(state): State<AppState>,
-    user: AuthUser,
+    _user: AuthUser,
     jar: CookieJar,
 ) -> impl IntoResponse {
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
