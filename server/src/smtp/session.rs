@@ -137,9 +137,11 @@ mod tests {
         read_line(&mut r).await;
         w.write_all(b"DATA\r\n").await.unwrap();
         read_line(&mut r).await;
-        // "..leading dot" — server must strip one leading dot
+        // "..leading dot" — server must strip one leading dot.
+        // Include proper RFC 5322 headers so the message isn't misclassified as spam.
         w.write_all(
-            b"Subject: Dot test\r\n\r\n..leading dot line\r\n.\r\n",
+            b"From: a@example.com\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
+              Message-ID: <dot@example.com>\r\nSubject: Dot test\r\n\r\n..leading dot line\r\n.\r\n",
         )
         .await
         .unwrap();
@@ -175,6 +177,58 @@ mod tests {
         // No message should have been stored since we RSET before DATA.
         let (_, total) = store.list_messages("rsettest", "INBOX", 0).unwrap();
         assert_eq!(total, 0, "RSET should prevent delivery");
+    }
+
+    #[tokio::test]
+    async fn spam_message_delivered_to_spam_folder() {
+        let (addr, store) = start().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await; // banner
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        w.write_all(b"MAIL FROM:<spammer@evil.example>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RCPT TO:<spamtest@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"DATA\r\n").await.unwrap();
+        read_line(&mut r).await; // 354
+        // Spam mail: no Date, no Message-ID, ALL-CAPS subject with spam phrase.
+        w.write_all(
+            b"From: bad@evil.example\r\nSubject: FREE MONEY CLICK HERE\r\n\
+              \r\nClaim your prize. Click here and act now. Buy now risk free guaranteed!\r\n.\r\n",
+        )
+        .await
+        .unwrap();
+        read_line(&mut r).await; // 250
+        let (_, inbox_total) = store.list_messages("spamtest", "INBOX", 0).unwrap();
+        let (_, spam_total) = store.list_messages("spamtest", "Spam", 0).unwrap();
+        assert_eq!(inbox_total, 0, "spam should not land in INBOX");
+        assert_eq!(spam_total, 1, "spam should be in Spam folder");
+    }
+
+    #[tokio::test]
+    async fn clean_message_delivered_to_inbox() {
+        let (addr, store) = start().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await;
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        w.write_all(b"MAIL FROM:<friend@trusted.example>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RCPT TO:<cleantest@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"DATA\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(
+            b"From: friend@trusted.example\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
+              Message-ID: <clean@trusted.example>\r\nSubject: Hello there\r\n\
+              \r\nJust a friendly note.\r\n.\r\n",
+        )
+        .await
+        .unwrap();
+        read_line(&mut r).await;
+        let (_, inbox_total) = store.list_messages("cleantest", "INBOX", 0).unwrap();
+        assert_eq!(inbox_total, 1, "clean mail should land in INBOX");
     }
 
     async fn start_submission() -> (SocketAddr, Arc<MailStore>) {
@@ -260,6 +314,7 @@ mod tests {
 use base64::Engine as _;
 use crate::config::Config;
 use crate::smtp::command::SmtpCommand;
+use crate::spam;
 use crate::store::MailStore;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -422,9 +477,31 @@ impl SmtpSession {
                     let rcpt = std::mem::take(&mut self.rcpt_to);
                     self.mail_from = None;
 
+                    // Spam check on inbound (non-authenticated) messages only.
+                    let (target_folder, tagged_body) = if !self.is_submission {
+                        let result = spam::check(
+                            &body,
+                            &self.config.domain,
+                            rcpt.len(),
+                            true,
+                        );
+                        tracing::debug!(
+                            score = result.score,
+                            spam = result.is_spam(),
+                            "spam check"
+                        );
+                        let headers = spam::spam_headers(&result).into_bytes();
+                        let mut tagged = headers;
+                        tagged.extend_from_slice(&body);
+                        let folder = if result.is_spam() { "Spam" } else { "INBOX" };
+                        (folder, tagged)
+                    } else {
+                        ("INBOX", body)
+                    };
+
                     for mailbox in &rcpt {
-                        match self.store.deliver(mailbox, "INBOX", &body) {
-                            Ok(uid) => tracing::info!(mailbox, uid, "delivered"),
+                        match self.store.deliver(mailbox, target_folder, &tagged_body) {
+                            Ok(uid) => tracing::info!(mailbox, uid, folder = target_folder, "delivered"),
                             Err(e) => tracing::error!(mailbox, "deliver failed: {e}"),
                         }
                     }

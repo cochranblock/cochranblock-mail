@@ -2,6 +2,7 @@ pub mod config;
 pub mod imap;
 pub mod server;
 pub mod smtp;
+pub mod spam;
 pub mod store;
 pub mod webmail;
 
