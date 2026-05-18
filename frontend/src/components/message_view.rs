@@ -1,7 +1,7 @@
 use crate::api;
 use crate::components::compose::ComposeModal;
 use leptos::prelude::*;
-use shared::{FlagUpdate, MessageFull, SendRequest};
+use shared::{AttachmentMeta, FlagUpdate, MessageFull, SendRequest};
 
 fn format_full_date(date: &chrono::DateTime<chrono::Utc>) -> String {
     date.format("%a, %b %d, %Y, %I:%M %p").to_string()
@@ -9,6 +9,26 @@ fn format_full_date(date: &chrono::DateTime<chrono::Utc>) -> String {
 
 fn sender_initial(from: &str) -> char {
     from.chars().find(|c| c.is_alphabetic()).unwrap_or('?').to_ascii_uppercase()
+}
+
+fn format_size(bytes: u32) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn attachment_icon(content_type: &str) -> &'static str {
+    let ct = content_type.to_ascii_lowercase();
+    if ct.starts_with("image/") { "🖼" }
+    else if ct == "application/pdf" { "📄" }
+    else if ct.starts_with("video/") { "🎞" }
+    else if ct.starts_with("audio/") { "🎵" }
+    else if ct.contains("zip") || ct.contains("gzip") || ct.contains("tar") { "🗜" }
+    else { "📎" }
 }
 
 #[component]
@@ -43,6 +63,9 @@ pub fn MessageView(
                         let subject = msg.meta.subject.clone();
                         let to = msg.meta.to.join(", ");
                         let has_html = msg.body_html.is_some();
+                        let attachments = msg.attachments.clone();
+                        let uid_val = msg.meta.uid;
+                        let mailbox_val = msg.meta.mailbox.clone();
 
                         let from_for_reply = msg.meta.from.clone();
                         let subject_for_reply = msg.meta.subject.clone();
@@ -73,6 +96,34 @@ pub fn MessageView(
                                 view! {
                                     <div class="message-body">{msg.body_text.clone()}</div>
                                 }.into_any()
+                            }}
+
+                            {if !attachments.is_empty() {
+                                let items = attachments.into_iter().map(|att| {
+                                    let url = format!(
+                                        "/api/messages/{uid_val}/attachment/{}?mailbox={mailbox_val}",
+                                        att.part
+                                    );
+                                    let icon = attachment_icon(&att.content_type);
+                                    let label = format!("{} {} ({})", icon, att.filename, format_size(att.size));
+                                    view! {
+                                        <a
+                                            class="attachment-link"
+                                            href=url
+                                            download=att.filename.clone()
+                                        >
+                                            {label}
+                                        </a>
+                                    }
+                                }).collect::<Vec<_>>();
+                                view! {
+                                    <div class="attachments">
+                                        <div class="attachments-label">"Attachments"</div>
+                                        {items}
+                                    </div>
+                                }.into_any()
+                            } else {
+                                view! { <span /> }.into_any()
                             }}
 
                             <div class="reply-actions">

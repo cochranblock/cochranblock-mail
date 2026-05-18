@@ -1,8 +1,9 @@
 use crate::webmail::session::{AppState, AuthUser};
 use axum::{
     Json,
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
 use mailparse::parse_mail;
@@ -131,6 +132,7 @@ pub async fn get_message(
     };
 
     let (body_text, body_html) = extract_bodies(&raw);
+    let attachments = state.store.list_attachments(&user.username, mailbox, uid).unwrap_or_default();
 
     // Mark as read on open.
     state
@@ -138,7 +140,7 @@ pub async fn get_message(
         .update_flags(&user.username, mailbox, uid, Some(true), None, None)
         .ok();
 
-    let full = MessageFull { meta, body_text, body_html };
+    let full = MessageFull { meta, body_text, body_html, attachments };
     (StatusCode::OK, Json(full)).into_response()
 }
 
@@ -209,6 +211,89 @@ pub async fn send_message(
     }
 
     (StatusCode::OK, Json(serde_json::json!({"ok": true, "message_id": message_id}))).into_response()
+}
+
+// ── GET /api/messages/:uid/attachment/:part?mailbox=INBOX ─────────────────────
+
+pub async fn get_attachment(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((uid_str, part_str)): Path<(String, String)>,
+    Query(params): Query<GetMessageParams>,
+) -> impl IntoResponse {
+    let uid: u64 = match uid_str.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new("bad_uid", "uid must be a u64")),
+            )
+                .into_response();
+        }
+    };
+    let part: u32 = match part_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new("bad_part", "part must be a u32")),
+            )
+                .into_response();
+        }
+    };
+    let mailbox = params.mailbox.as_deref().unwrap_or("INBOX");
+
+    let metas = match state.store.list_attachments(&user.username, mailbox, uid) {
+        Ok(m) => m,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::new("store_error", "failed to list attachments")),
+            )
+                .into_response();
+        }
+    };
+    let Some(meta) = metas.into_iter().find(|m| m.part == part) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError::new("not_found", "attachment not found")),
+        )
+            .into_response();
+    };
+
+    let bytes = match state.store.get_attachment(&user.username, mailbox, uid, part) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError::new("not_found", "attachment blob not found")),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::new("store_error", "failed to fetch attachment")),
+            )
+                .into_response();
+        }
+    };
+
+    let mut headers = HeaderMap::new();
+    let ct_str = if meta.content_type.is_empty() {
+        "application/octet-stream".to_string()
+    } else {
+        meta.content_type.clone()
+    };
+    if let Ok(v) = ct_str.parse() {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
+    let disposition = format!("attachment; filename=\"{}\"", meta.filename.replace('"', "'"));
+    if let Ok(v) = disposition.parse() {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+
+    (StatusCode::OK, headers, Body::from(bytes)).into_response()
 }
 
 // ── PATCH /api/messages/:uid ──────────────────────────────────────────────────

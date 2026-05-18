@@ -40,6 +40,14 @@ pub(crate) const PARTIAL_SESSIONS: TableDefinition<&str, &[u8]> =
 /// Ephemeral key-value scratch space (pending TOTP secrets, etc.). key = arbitrary string.
 pub(crate) const SCRATCH: TableDefinition<&str, &str> = TableDefinition::new("scratch");
 
+/// postcard-encoded Vec<AttachmentMeta>. key = "username/mailbox/uid_hex".
+pub(crate) const ATTACHMENT_META: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("attachment_meta");
+
+/// zstd-compressed attachment blob. key = "username/mailbox/uid_hex/part".
+pub(crate) const ATTACHMENTS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("attachments");
+
 // ── Codec helpers ─────────────────────────────────────────────────────────────
 
 pub(super) fn enc<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
@@ -73,6 +81,8 @@ impl MailStore {
             tx.open_table(SESSIONS)?;
             tx.open_table(PARTIAL_SESSIONS)?;
             tx.open_table(SCRATCH)?;
+            tx.open_table(ATTACHMENT_META)?;
+            tx.open_table(ATTACHMENTS)?;
             tx.commit()?;
         }
         Ok(Self { db: Arc::new(db), totp_key: None })

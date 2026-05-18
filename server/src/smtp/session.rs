@@ -520,7 +520,12 @@ impl SmtpSession {
 
                     for mailbox in &rcpt {
                         match self.store.deliver(mailbox, target_folder, &tagged_body) {
-                            Ok(uid) => tracing::info!(mailbox, uid, folder = target_folder, "delivered"),
+                            Ok(uid) => {
+                                tracing::info!(mailbox, uid, folder = target_folder, "delivered");
+                                self.store
+                                    .store_attachments_from_raw(mailbox, target_folder, uid, &tagged_body)
+                                    .unwrap_or_else(|e| tracing::warn!(mailbox, "attachment extract failed: {e}"));
+                            }
                             Err(e) => tracing::error!(mailbox, "deliver failed: {e}"),
                         }
                     }

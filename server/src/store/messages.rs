@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use super::{enc, dec, MailStore, StoreError, MAILBOXES, MESSAGE_META, MESSAGES};
+use super::{enc, dec, MailStore, StoreError, MAILBOXES, MESSAGE_META, MESSAGES, ATTACHMENT_META, ATTACHMENTS};
 use redb::ReadableTable;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -276,6 +276,8 @@ impl MailStore {
         {
             let mut meta_table = tx.open_table(MESSAGE_META)?;
             let mut msg_table = tx.open_table(MESSAGES)?;
+            let mut att_meta_table = tx.open_table(ATTACHMENT_META)?;
+            let mut att_table = tx.open_table(ATTACHMENTS)?;
 
             for (key, _was_seen) in &to_delete {
                 if let Some(uid_hex) = key.split('/').next_back()
@@ -285,6 +287,7 @@ impl MailStore {
                 }
                 meta_table.remove(key.as_str())?;
                 msg_table.remove(key.as_str())?;
+                delete_attachments_for_msg(&mut att_meta_table, &mut att_table, key)?;
             }
 
             // Update mailbox state counts.
@@ -303,6 +306,91 @@ impl MailStore {
         tx.commit()?;
         expunged.sort_unstable();
         Ok(expunged)
+    }
+
+    // ── Attachments ───────────────────────────────────────────────────────────
+
+    /// Parse raw RFC 5322 bytes, extract attachment parts, zstd-compress, and store.
+    /// Called immediately after `deliver()`. No-ops silently if the message has no attachments.
+    pub fn store_attachments_from_raw(
+        &self,
+        username: &str,
+        mailbox: &str,
+        uid: u64,
+        raw: &[u8],
+    ) -> Result<(), StoreError> {
+        let Ok(msg) = mailparse::parse_mail(raw) else { return Ok(()) };
+        let mut collected = Vec::new();
+        collect_attachments(&msg, &mut collected, &mut 0u32);
+        if collected.is_empty() {
+            return Ok(());
+        }
+        self.store_attachments(username, mailbox, uid, collected)
+    }
+
+    pub fn store_attachments(
+        &self,
+        username: &str,
+        mailbox: &str,
+        uid: u64,
+        attachments: Vec<(shared::AttachmentMeta, Vec<u8>)>,
+    ) -> Result<(), StoreError> {
+        let msg_key = message_key(username, mailbox, uid);
+        let tx = self.db.begin_write()?;
+        {
+            let mut att_meta_table = tx.open_table(ATTACHMENT_META)?;
+            let mut att_table = tx.open_table(ATTACHMENTS)?;
+
+            let metas: Vec<shared::AttachmentMeta> =
+                attachments.iter().map(|(m, _)| m.clone()).collect();
+            let meta_bytes = enc(&metas)?;
+            att_meta_table.insert(msg_key.as_str(), meta_bytes.as_slice())?;
+
+            for (meta, body) in &attachments {
+                let att_key = format!("{msg_key}/{}", meta.part);
+                let compressed = zstd::encode_all(body.as_slice(), 3)
+                    .ok()
+                    .filter(|c| c.len() < body.len())
+                    .unwrap_or_else(|| body.clone());
+                att_table.insert(att_key.as_str(), compressed.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_attachments(
+        &self,
+        username: &str,
+        mailbox: &str,
+        uid: u64,
+    ) -> Result<Vec<shared::AttachmentMeta>, StoreError> {
+        let key = message_key(username, mailbox, uid);
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(ATTACHMENT_META)?;
+        match table.get(key.as_str())? {
+            None => Ok(vec![]),
+            Some(v) => dec(v.value()),
+        }
+    }
+
+    pub fn get_attachment(
+        &self,
+        username: &str,
+        mailbox: &str,
+        uid: u64,
+        part: u32,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let att_key = format!("{}/{part}", message_key(username, mailbox, uid));
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(ATTACHMENTS)?;
+        match table.get(att_key.as_str())? {
+            None => Ok(None),
+            Some(v) => {
+                let raw = zstd::decode_all(v.value()).unwrap_or_else(|_| v.value().to_vec());
+                Ok(Some(raw))
+            }
+        }
     }
 
     // ── Flag updates ──────────────────────────────────────────────────────────
@@ -365,6 +453,125 @@ impl MailStore {
         tx.commit()?;
         Ok(())
     }
+}
+
+// ── Attachment cleanup helper ─────────────────────────────────────────────────
+
+fn delete_attachments_for_msg(
+    att_meta_table: &mut redb::Table<&str, &[u8]>,
+    att_table: &mut redb::Table<&str, &[u8]>,
+    msg_key: &str,
+) -> Result<(), StoreError> {
+    let Some(meta_bytes) = att_meta_table.get(msg_key)?.map(|v| v.value().to_vec()) else {
+        return Ok(());
+    };
+    if let Ok(metas) = dec::<Vec<shared::AttachmentMeta>>(&meta_bytes) {
+        for meta in &metas {
+            let att_key = format!("{msg_key}/{}", meta.part);
+            att_table.remove(att_key.as_str())?;
+        }
+    }
+    att_meta_table.remove(msg_key)?;
+    Ok(())
+}
+
+// ── MIME attachment extraction helpers ────────────────────────────────────────
+
+fn collect_attachments(
+    part: &mailparse::ParsedMail,
+    out: &mut Vec<(shared::AttachmentMeta, Vec<u8>)>,
+    counter: &mut u32,
+) {
+    let mime = part.ctype.mimetype.to_ascii_lowercase();
+    if mime.starts_with("multipart/") {
+        for sub in &part.subparts {
+            collect_attachments(sub, out, counter);
+        }
+        return;
+    }
+
+    // Inline text/plain and text/html are body content, not attachments.
+    // A part is an attachment when it has an explicit attachment disposition,
+    // a filename, or a non-text MIME type.
+    let disp_header = part
+        .headers
+        .iter()
+        .find(|h| h.get_key_ref().eq_ignore_ascii_case("content-disposition"))
+        .map(|h| h.get_value());
+    let explicit_attach = disp_header
+        .as_deref()
+        .map(|d| d.trim().to_ascii_lowercase().starts_with("attachment"))
+        .unwrap_or(false);
+    let has_filename = disp_header.as_deref().map(|d| param_value(d, "filename").is_some()).unwrap_or(false)
+        || part.ctype.params.contains_key("name");
+    let non_text = !mime.starts_with("text/") && !mime.is_empty();
+
+    if !explicit_attach && !has_filename && !non_text {
+        return;
+    }
+
+    let Ok(body) = part.get_body_raw() else { return };
+    *counter += 1;
+    let part_num = *counter;
+    let filename = extract_filename(part, part_num);
+    let meta = shared::AttachmentMeta {
+        part: part_num,
+        filename,
+        content_type: part.ctype.mimetype.clone(),
+        size: body.len() as u32,
+    };
+    out.push((meta, body));
+}
+
+fn extract_filename(part: &mailparse::ParsedMail, part_num: u32) -> String {
+    for header in &part.headers {
+        if header.get_key_ref().eq_ignore_ascii_case("content-disposition")
+            && let Some(name) = param_value(&header.get_value(), "filename")
+        {
+            return name;
+        }
+    }
+    if let Some(name) = part.ctype.params.get("name") {
+        return name.clone();
+    }
+    let ext = match part.ctype.mimetype.to_ascii_lowercase().as_str() {
+        "application/pdf" => "pdf",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "text/calendar" => "ics",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        _ => "bin",
+    };
+    format!("attachment_{part_num}.{ext}")
+}
+
+fn param_value(header_val: &str, key: &str) -> Option<String> {
+    for segment in header_val.split(';') {
+        let segment = segment.trim();
+        // Handle filename*=charset''value (RFC 5987) by extracting after the last '
+        if let Some(rest) = segment.strip_prefix(&format!("{key}*=")) {
+            let val = rest.splitn(3, '\'').nth(2).unwrap_or(rest).trim_matches('"');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+        if let Some(rest) = segment.strip_prefix(&format!("{key}=")) {
+            let val = rest.trim_matches('"');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
 }
 
 // ── Message parsing helpers ───────────────────────────────────────────────────
@@ -563,6 +770,81 @@ This is the body of the email.\r\n";
         store.update_flags("alice", "INBOX", 1, None, None, Some(true)).unwrap();
         let uids = store.list_uids_asc("alice", "INBOX").unwrap();
         assert_eq!(uids, vec![1, 2], "\\Deleted messages must retain seq number until EXPUNGE");
+    }
+
+    // ── Attachment tests ───────────────────────────────────────────────────────
+
+    const MIME_WITH_PDF: &[u8] = b"\
+From: sender@example.com\r\n\
+To: alice@cochranblock.org\r\n\
+Subject: Report\r\n\
+Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"boundary42\"\r\n\
+\r\n\
+--boundary42\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+See attached report.\r\n\
+--boundary42\r\n\
+Content-Type: application/pdf\r\n\
+Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+JVBERi0xLjQKdGVzdA==\r\n\
+--boundary42--\r\n";
+
+    #[test]
+    fn store_and_list_attachments_roundtrip() {
+        let store = open_store();
+        let uid = store.deliver("alice", "INBOX", MIME_WITH_PDF).unwrap();
+        store.store_attachments_from_raw("alice", "INBOX", uid, MIME_WITH_PDF).unwrap();
+
+        let metas = store.list_attachments("alice", "INBOX", uid).unwrap();
+        assert_eq!(metas.len(), 1, "expected 1 attachment");
+        assert_eq!(metas[0].part, 1);
+        assert_eq!(metas[0].filename, "report.pdf");
+        assert_eq!(metas[0].content_type, "application/pdf");
+    }
+
+    #[test]
+    fn get_attachment_returns_decoded_bytes() {
+        let store = open_store();
+        let uid = store.deliver("alice", "INBOX", MIME_WITH_PDF).unwrap();
+        store.store_attachments_from_raw("alice", "INBOX", uid, MIME_WITH_PDF).unwrap();
+
+        let bytes = store.get_attachment("alice", "INBOX", uid, 1).unwrap();
+        assert!(bytes.is_some(), "attachment blob should exist");
+        // base64 "%PDF-1.4\ntest" decodes to specific bytes
+        assert!(bytes.unwrap().starts_with(b"%PDF"), "decoded bytes should start with PDF magic");
+    }
+
+    #[test]
+    fn get_attachment_missing_part_returns_none() {
+        let store = open_store();
+        let uid = store.deliver("alice", "INBOX", TEST_MSG).unwrap();
+        assert!(store.get_attachment("alice", "INBOX", uid, 99).unwrap().is_none());
+    }
+
+    #[test]
+    fn plain_text_message_has_no_attachments() {
+        let store = open_store();
+        let uid = store.deliver("alice", "INBOX", TEST_MSG).unwrap();
+        store.store_attachments_from_raw("alice", "INBOX", uid, TEST_MSG).unwrap();
+        let metas = store.list_attachments("alice", "INBOX", uid).unwrap();
+        assert!(metas.is_empty(), "plain text message must not produce attachments");
+    }
+
+    #[test]
+    fn expunge_deletes_attachment_data() {
+        let store = open_store();
+        let uid = store.deliver("alice", "INBOX", MIME_WITH_PDF).unwrap();
+        store.store_attachments_from_raw("alice", "INBOX", uid, MIME_WITH_PDF).unwrap();
+        store.update_flags("alice", "INBOX", uid, None, None, Some(true)).unwrap();
+        store.expunge_deleted("alice", "INBOX").unwrap();
+
+        assert!(store.list_attachments("alice", "INBOX", uid).unwrap().is_empty());
+        assert!(store.get_attachment("alice", "INBOX", uid, 1).unwrap().is_none());
     }
 
     #[test]

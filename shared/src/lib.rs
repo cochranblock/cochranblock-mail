@@ -92,11 +92,24 @@ impl MessageMeta {
     }
 }
 
+/// A single MIME attachment extracted from an inbound message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AttachmentMeta {
+    /// 1-based part index within the message.
+    pub part: u32,
+    pub filename: String,
+    pub content_type: String,
+    /// Uncompressed size in bytes.
+    pub size: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageFull {
     pub meta: MessageMeta,
     pub body_text: String,
     pub body_html: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +228,26 @@ mod tests {
         let back: SendRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.to, req.to);
         assert_eq!(back.subject, req.subject);
+    }
+
+    #[test]
+    fn attachment_meta_serde() {
+        let a = AttachmentMeta {
+            part: 1,
+            filename: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 12345,
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: AttachmentMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
+    }
+
+    #[test]
+    fn message_full_attachments_default_empty() {
+        let json = r#"{"meta":{"uid":1,"mailbox":"INBOX","from":"a@b.com","to":[],"subject":"s","date":"2024-01-01T00:00:00Z","flags":0,"size":0,"snippet":""},"body_text":"","body_html":null}"#;
+        let full: MessageFull = serde_json::from_str(json).unwrap();
+        assert!(full.attachments.is_empty(), "missing attachments field should default to []");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 // RFC 3501 §6.4.5, §7.4.2
 
 use shared::flags as msg_flags;
+use mailparse::ParsedMail;
 
 // ── Sequence set ──────────────────────────────────────────────────────────────
 
@@ -557,12 +558,52 @@ fn extract_section(raw: &[u8], section: &Section) -> (String, Vec<u8>) {
 }
 
 fn build_bodystructure(raw: &[u8]) -> String {
-    // Simplified: return a basic text/plain structure
-    // A proper implementation would parse the MIME tree
-    let body = extract_body(raw);
-    let size = body.len();
-    let lines = body.iter().filter(|&&b| b == b'\n').count();
-    format!("(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" {size} {lines})")
+    match mailparse::parse_mail(raw) {
+        Err(_) => "(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"US-ASCII\") NIL NIL \"7BIT\" 0 0)".to_string(),
+        Ok(msg) => format_part(&msg),
+    }
+}
+
+fn format_part(part: &ParsedMail) -> String {
+    let mime = part.ctype.mimetype.to_ascii_lowercase();
+
+    if mime.starts_with("multipart/") {
+        let subtype = mime
+            .split_once('/')
+            .map(|(_, s)| s.to_ascii_uppercase())
+            .unwrap_or_else(|| "MIXED".to_string());
+        let children = part.subparts.iter().map(|s| format_part(s)).collect::<Vec<_>>().join(" ");
+        return format!("({children} \"{subtype}\")");
+    }
+
+    let (type_up, sub_up) = mime
+        .split_once('/')
+        .map(|(t, s)| (t.to_ascii_uppercase(), s.to_ascii_uppercase()))
+        .unwrap_or_else(|| ("TEXT".to_string(), "PLAIN".to_string()));
+
+    let charset = part
+        .ctype
+        .params
+        .get("charset")
+        .cloned()
+        .unwrap_or_else(|| "US-ASCII".to_string())
+        .to_ascii_uppercase();
+
+    let encoding = part
+        .headers
+        .iter()
+        .find(|h| h.get_key_ref().eq_ignore_ascii_case("content-transfer-encoding"))
+        .map(|h| h.get_value().trim().to_ascii_uppercase())
+        .unwrap_or_else(|| "7BIT".to_string());
+
+    let size = part.get_body_raw().map(|b| b.len()).unwrap_or(0);
+
+    if type_up == "TEXT" {
+        let lines = part.get_body_raw().map(|b| b.iter().filter(|&&c| c == b'\n').count()).unwrap_or(0);
+        format!("(\"{type_up}\" \"{sub_up}\" (\"CHARSET\" \"{charset}\") NIL NIL \"{encoding}\" {size} {lines})")
+    } else {
+        format!("(\"{type_up}\" \"{sub_up}\" NIL NIL NIL \"{encoding}\" {size})")
+    }
 }
 
 // ── STORE flag helpers ────────────────────────────────────────────────────────

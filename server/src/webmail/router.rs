@@ -39,6 +39,7 @@ pub fn build(config: Arc<crate::config::Config>, store: Arc<MailStore>) -> Route
         .route("/messages", post(mail::send_message))
         .route("/messages/{uid}", get(mail::get_message))
         .route("/messages/{uid}", patch(mail::update_flags))
+        .route("/messages/{uid}/attachment/{part}", get(mail::get_attachment))
         .with_state(state);
 
     let app = Router::new()

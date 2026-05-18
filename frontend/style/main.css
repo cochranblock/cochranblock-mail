@@ -417,6 +417,42 @@ html, body {
   border-radius: var(--radius-sm);
 }
 
+.attachments {
+  margin: 20px 0 8px;
+  padding: 12px 16px;
+  background: #f5f5f5;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+}
+
+.attachments-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #888;
+  margin-bottom: 8px;
+}
+
+.attachment-link {
+  display: inline-flex;
+  align-items: center;
+  margin: 4px 8px 4px 0;
+  padding: 6px 12px;
+  background: #fff;
+  border: 1px solid #d0d0d0;
+  border-radius: 20px;
+  color: #1a1a2e;
+  font-size: 13px;
+  text-decoration: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.attachment-link:hover {
+  background: #e8f0fe;
+  border-color: #b0bce8;
+}
+
 .reply-actions {
   display: flex;
   gap: 10px;
