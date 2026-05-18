@@ -45,6 +45,7 @@ pub(crate) const SCRATCH: TableDefinition<&str, &str> = TableDefinition::new("sc
 #[derive(Clone)]
 pub struct MailStore {
     pub(crate) db: Arc<Database>,
+    pub(crate) totp_key: Option<[u8; 32]>,
 }
 
 impl MailStore {
@@ -64,7 +65,14 @@ impl MailStore {
             tx.open_table(SCRATCH)?;
             tx.commit()?;
         }
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self { db: Arc::new(db), totp_key: None })
+    }
+
+    /// Enable at-rest encryption for TOTP secrets. Call this before any secrets
+    /// are written; existing plaintext secrets remain readable as a fallback.
+    pub fn with_encryption(mut self, key: [u8; 32]) -> Self {
+        self.totp_key = Some(key);
+        self
     }
 
     // ── Scratch helpers (ephemeral key-value) ─────────────────────────────────

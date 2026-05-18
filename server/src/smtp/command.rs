@@ -8,6 +8,9 @@ pub enum SmtpCommand {
     Quit,
     Noop,
     Rset,
+    /// AUTH PLAIN — carries the inline base64 payload, or empty string if client
+    /// will send credentials on the next line.
+    AuthPlain(String),
     Unknown(String),
 }
 
@@ -30,6 +33,8 @@ impl SmtpCommand {
             SmtpCommand::Noop
         } else if upper.starts_with("RSET") {
             SmtpCommand::Rset
+        } else if upper.starts_with("AUTH PLAIN") {
+            SmtpCommand::AuthPlain(line[10..].trim().to_string())
         } else {
             SmtpCommand::Unknown(line.to_string())
         }
@@ -101,6 +106,18 @@ mod tests {
     fn parse_rset() {
         let cmd = SmtpCommand::parse("RSET");
         assert!(matches!(cmd, SmtpCommand::Rset));
+    }
+
+    #[test]
+    fn parse_auth_plain_inline() {
+        let cmd = SmtpCommand::parse("AUTH PLAIN dXNlcjpwYXNz");
+        assert!(matches!(cmd, SmtpCommand::AuthPlain(p) if p == "dXNlcjpwYXNz"));
+    }
+
+    #[test]
+    fn parse_auth_plain_empty_payload() {
+        let cmd = SmtpCommand::parse("AUTH PLAIN");
+        assert!(matches!(cmd, SmtpCommand::AuthPlain(p) if p.is_empty()));
     }
 
     #[test]

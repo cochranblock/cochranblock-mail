@@ -23,6 +23,7 @@ mod tests {
             frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
             secure_cookies: false,
+            totp_encryption_key: None,
         })
     }
 

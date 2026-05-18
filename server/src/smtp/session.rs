@@ -26,6 +26,7 @@ mod tests {
             frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
             secure_cookies: false,
+            totp_encryption_key: None,
         })
     }
 
@@ -36,7 +37,7 @@ mod tests {
         let (s, c) = (Arc::clone(&store), smtp_config());
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            SmtpSession::new(stream, peer, c, s).run().await.ok();
+            SmtpSession::new(stream, peer, c, s, false).run().await.ok();
         });
         (addr, store)
     }
@@ -175,8 +176,88 @@ mod tests {
         let (_, total) = store.list_messages("rsettest", "INBOX", 0).unwrap();
         assert_eq!(total, 0, "RSET should prevent delivery");
     }
+
+    async fn start_submission() -> (SocketAddr, Arc<MailStore>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let store = Arc::new(MailStore::open_temp().unwrap());
+        // Add a real user so AUTH PLAIN can verify credentials.
+        store.create_user("submituser", "s@cochranblock.test", "secret").unwrap();
+        let (s, c) = (Arc::clone(&store), smtp_config());
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            SmtpSession::new(stream, peer, c, s, true).run().await.ok();
+        });
+        (addr, store)
+    }
+
+    #[tokio::test]
+    async fn submission_requires_auth_before_mail_from() {
+        let (addr, _store) = start_submission().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await; // banner
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        // No AUTH — MAIL FROM should be rejected with 530
+        w.write_all(b"MAIL FROM:<s@cochranblock.test>\r\n").await.unwrap();
+        let resp = read_line(&mut r).await;
+        assert!(resp.starts_with("530"), "expected 530 auth required, got: {resp}");
+    }
+
+    #[tokio::test]
+    async fn submission_auth_plain_valid_credentials_accepted() {
+        use base64::Engine as _;
+        let (addr, _store) = start_submission().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await;
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        // AUTH PLAIN \0submituser\0secret
+        let cred = base64::engine::general_purpose::STANDARD
+            .encode(b"\x00submituser\x00secret");
+        w.write_all(format!("AUTH PLAIN {cred}\r\n").as_bytes()).await.unwrap();
+        let resp = read_line(&mut r).await;
+        assert!(resp.starts_with("235"), "expected 235 auth ok, got: {resp}");
+    }
+
+    #[tokio::test]
+    async fn submission_auth_plain_wrong_password_is_535() {
+        use base64::Engine as _;
+        let (addr, _store) = start_submission().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await;
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        let cred = base64::engine::general_purpose::STANDARD
+            .encode(b"\x00submituser\x00wrongpass");
+        w.write_all(format!("AUTH PLAIN {cred}\r\n").as_bytes()).await.unwrap();
+        let resp = read_line(&mut r).await;
+        assert!(resp.starts_with("535"), "expected 535 auth failed, got: {resp}");
+    }
+
+    #[tokio::test]
+    async fn data_too_large_returns_552() {
+        let (addr, _store) = start().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await;
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        w.write_all(b"MAIL FROM:<a@example.com>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RCPT TO:<sizetest@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"DATA\r\n").await.unwrap();
+        read_line(&mut r).await; // 354
+        // Send exactly MAX_MESSAGE_SIZE + 1 bytes in the body (one long line).
+        let big_line = vec![b'x'; 26_214_401];
+        w.write_all(&big_line).await.unwrap();
+        w.write_all(b"\r\n.\r\n").await.unwrap();
+        let resp = read_line(&mut r).await;
+        assert!(resp.starts_with("552"), "expected 552 too large, got: {resp}");
+    }
 }
 
+use base64::Engine as _;
 use crate::config::Config;
 use crate::smtp::command::SmtpCommand;
 use crate::store::MailStore;
@@ -185,12 +266,19 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
+/// Maximum message body size: matches the SIZE advertised in EHLO (25 MiB).
+const MAX_MESSAGE_SIZE: usize = 26_214_400;
+
 pub struct SmtpSession {
     stream: TcpStream,
     peer: SocketAddr,
     config: Arc<Config>,
     store: Arc<MailStore>,
     greeted: bool,
+    /// True when this connection arrived on the submission port (587).
+    is_submission: bool,
+    /// Set after a successful AUTH PLAIN on the submission port.
+    authenticated: bool,
     mail_from: Option<String>,
     rcpt_to: Vec<String>,
 }
@@ -201,16 +289,25 @@ impl SmtpSession {
         peer: SocketAddr,
         config: Arc<Config>,
         store: Arc<MailStore>,
+        is_submission: bool,
     ) -> Self {
-        Self { stream, peer, config, store, greeted: false, mail_from: None, rcpt_to: Vec::new() }
+        Self {
+            stream,
+            peer,
+            config,
+            store,
+            greeted: false,
+            is_submission,
+            authenticated: false,
+            mail_from: None,
+            rcpt_to: Vec::new(),
+        }
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let banner = format!("220 {} ESMTP cochranblock-mail\r\n", self.config.domain);
         self.stream.write_all(banner.as_bytes()).await?;
 
-        // Split so we can hold mutable writer alongside the reader.
-        // SAFETY: TcpStream::split is safe — reader and writer are independent.
         let stream = &mut self.stream;
         let (reader, mut writer) = stream.split();
         let mut lines = BufReader::new(reader).lines();
@@ -221,10 +318,11 @@ impl SmtpSession {
                 SmtpCommand::Ehlo(host) => {
                     tracing::info!(peer = %self.peer, "EHLO {host}");
                     self.greeted = true;
+                    let auth_line = if self.is_submission { "250-AUTH PLAIN\r\n" } else { "" };
                     writer
                         .write_all(
                             format!(
-                                "250-{}\r\n250-SIZE 26214400\r\n250-8BITMIME\r\n250 ENHANCEDSTATUSCODES\r\n",
+                                "250-{}\r\n250-SIZE {MAX_MESSAGE_SIZE}\r\n250-8BITMIME\r\n{auth_line}250 ENHANCEDSTATUSCODES\r\n",
                                 self.config.domain
                             )
                             .as_bytes(),
@@ -238,9 +336,44 @@ impl SmtpSession {
                         .write_all(format!("250 {}\r\n", self.config.domain).as_bytes())
                         .await?;
                 }
+                SmtpCommand::AuthPlain(payload) => {
+                    if !self.is_submission {
+                        writer.write_all(b"503 5.5.1 AUTH not available on port 25\r\n").await?;
+                        continue;
+                    }
+                    let b64 = if payload.is_empty() {
+                        // RFC 4616: server challenges with "334 ", client sends base64 next
+                        writer.write_all(b"334 \r\n").await?;
+                        lines.next_line().await?.unwrap_or_default()
+                    } else {
+                        payload
+                    };
+                    match decode_auth_plain(&b64) {
+                        Some((username, password)) => {
+                            match self.store.verify_password(&username, &password) {
+                                Ok(true) => {
+                                    tracing::info!(peer = %self.peer, username, "AUTH PLAIN ok");
+                                    self.authenticated = true;
+                                    writer.write_all(b"235 2.7.0 Authentication successful\r\n").await?;
+                                }
+                                _ => {
+                                    tracing::warn!(peer = %self.peer, username, "AUTH PLAIN failed");
+                                    writer.write_all(b"535 5.7.8 Authentication credentials invalid\r\n").await?;
+                                }
+                            }
+                        }
+                        None => {
+                            writer.write_all(b"501 5.5.4 Malformed AUTH input\r\n").await?;
+                        }
+                    }
+                }
                 SmtpCommand::MailFrom(addr) => {
                     if !self.greeted {
                         writer.write_all(b"503 5.5.1 EHLO/HELO required\r\n").await?;
+                        continue;
+                    }
+                    if self.is_submission && !self.authenticated {
+                        writer.write_all(b"530 5.7.0 Authentication required\r\n").await?;
                         continue;
                     }
                     self.mail_from = Some(addr);
@@ -260,14 +393,30 @@ impl SmtpSession {
                 SmtpCommand::Data => {
                     writer.write_all(b"354 End data with <CR LF>.<CR LF>\r\n").await?;
                     let mut body = Vec::new();
+                    let mut too_large = false;
                     while let Some(data_line) = lines.next_line().await? {
                         if data_line == "." {
                             break;
                         }
                         // RFC 5321 §4.5.2: un-stuff leading dots.
                         let line_bytes = data_line.strip_prefix('.').unwrap_or(&data_line);
+                        if body.len() + line_bytes.len() + 2 > MAX_MESSAGE_SIZE {
+                            too_large = true;
+                            // drain remaining lines so the session stays in sync
+                            while let Some(drain) = lines.next_line().await? {
+                                if drain == "." { break; }
+                            }
+                            break;
+                        }
                         body.extend_from_slice(line_bytes.as_bytes());
                         body.extend_from_slice(b"\r\n");
+                    }
+
+                    if too_large {
+                        self.mail_from = None;
+                        self.rcpt_to.clear();
+                        writer.write_all(b"552 5.3.4 Message exceeds maximum size\r\n").await?;
+                        continue;
                     }
 
                     let rcpt = std::mem::take(&mut self.rcpt_to);
@@ -300,5 +449,21 @@ impl SmtpSession {
             }
         }
         Ok(())
+    }
+}
+
+/// Decode an AUTH PLAIN base64 blob: `\0authcid\0passwd` or `authzid\0authcid\0passwd`.
+/// Returns (username, password) on success.
+fn decode_auth_plain(b64: &str) -> Option<(String, String)> {
+    let decoded = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
+    // Split on NUL bytes; format is [authzid NUL] authcid NUL passwd
+    let parts: Vec<&[u8]> = decoded.splitn(3, |&b| b == 0).collect();
+    match parts.as_slice() {
+        // "\0username\0password" → parts[0]="" parts[1]=username parts[2]=password
+        [_, authcid, passwd] if !authcid.is_empty() => Some((
+            String::from_utf8(authcid.to_vec()).ok()?,
+            String::from_utf8(passwd.to_vec()).ok()?,
+        )),
+        _ => None,
     }
 }

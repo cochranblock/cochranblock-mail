@@ -280,7 +280,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::store::MailStore;
-    use crate::webmail::{auth, session::{AppState, SESSION_COOKIE}};
+    use crate::webmail::{auth, rate_limit::RateLimiter, session::{AppState, SESSION_COOKIE}};
     use axum::{Router, routing};
     use axum_test::TestServer;
     use shared::{
@@ -303,13 +303,15 @@ mod tests {
             frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
             secure_cookies: false,
+            totp_encryption_key: None,
         })
     }
 
     fn build_server() -> (TestServer, Arc<MailStore>) {
         let store = Arc::new(MailStore::open_temp().unwrap());
         let config = test_config();
-        let state = AppState { store: Arc::clone(&store), config };
+        let rate_limiter = Arc::new(RateLimiter::new(5, 300, 900));
+        let state = AppState { store: Arc::clone(&store), config, rate_limiter };
         let app = Router::new()
             .route("/api/auth/login", routing::post(auth::login))
             .route("/api/auth/totp/setup", routing::get(auth::totp_setup))

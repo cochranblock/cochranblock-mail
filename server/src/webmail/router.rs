@@ -1,15 +1,29 @@
 use crate::config::Config;
 use crate::store::MailStore;
-use crate::webmail::{auth, mail, session::AppState};
+use crate::webmail::{auth, mail, rate_limit::RateLimiter, session::AppState};
 use axum::{
     Router,
+    extract::Request,
+    http::{header, HeaderValue},
+    middleware::{self, Next},
+    response::Response,
     routing::{delete, get, patch, post},
 };
 use std::sync::Arc;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
+async fn hsts(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+    );
+    res
+}
+
 pub fn build(config: Arc<Config>, store: Arc<MailStore>) -> Router {
-    let state = AppState { store, config: Arc::clone(&config) };
+    let rate_limiter = Arc::new(RateLimiter::new(5, 300, 900));
+    let state = AppState { store, config: Arc::clone(&config), rate_limiter };
 
     let api = Router::new()
         // Auth
@@ -30,7 +44,7 @@ pub fn build(config: Arc<Config>, store: Arc<MailStore>) -> Router {
 
     Router::new()
         .nest("/api", api)
-        // Serve the Leptos WASM bundle and static assets.
         .nest_service("/", ServeDir::new(&frontend_dist).append_index_html_on_directories(true))
+        .layer(middleware::from_fn(hsts))
         .layer(CorsLayer::permissive())
 }

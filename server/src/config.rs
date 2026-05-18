@@ -18,6 +18,8 @@ pub struct Config {
     pub session_ttl_secs: i64,
     /// Set Secure flag on session cookie. Disable only for local dev without TLS.
     pub secure_cookies: bool,
+    /// 32-byte AES key for encrypting TOTP secrets at rest. None = plaintext (dev only).
+    pub totp_encryption_key: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Error)]
@@ -43,7 +45,25 @@ impl Config {
             secure_cookies: env_or("SESSION_SECURE_COOKIE", "true")
                 .parse()
                 .unwrap_or(true),
+            totp_encryption_key: parse_hex_key(&env_or("TOTP_ENCRYPTION_KEY", "")),
         })
+    }
+}
+
+fn parse_hex_key(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let bytes: Vec<u8> = (0..64)
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect();
+    if bytes.len() == 32 {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(arr)
+    } else {
+        None
     }
 }
 

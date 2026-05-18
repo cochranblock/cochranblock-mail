@@ -16,18 +16,23 @@ impl Server {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let store = Arc::new(MailStore::open(&self.config.db_path)?);
+        let store_raw = MailStore::open(&self.config.db_path)?;
+        let store = Arc::new(match self.config.totp_encryption_key {
+            Some(key) => store_raw.with_encryption(key),
+            None => store_raw,
+        });
         let config = Arc::new(self.config);
 
         let smtp = SmtpListener::new(Arc::clone(&config), Arc::clone(&store));
+        let smtp_sub = SmtpListener::new_submission(Arc::clone(&config), Arc::clone(&store));
         let imap = ImapListener::new(Arc::clone(&config), Arc::clone(&store));
 
         let http_addr = format!("0.0.0.0:{}", config.http_port);
         let http_listener = TcpListener::bind(&http_addr).await?;
         let app = router::build(Arc::clone(&config), Arc::clone(&store));
 
-        tracing::info!("SMTP listening on :{}", config.smtp_port);
-        tracing::info!("SMTP submission on :{}", config.smtp_submission_port);
+        tracing::info!("SMTP MX on :{}", config.smtp_port);
+        tracing::info!("SMTP submission (AUTH) on :{}", config.smtp_submission_port);
         tracing::info!("IMAP listening on :{}", config.imap_port);
         tracing::info!("HTTP webmail on :{}", config.http_port);
 
@@ -51,6 +56,7 @@ impl Server {
 
         tokio::try_join!(
             smtp.listen(),
+            smtp_sub.listen(),
             imap.listen(),
             async {
                 axum::serve(http_listener, app).await.map_err(anyhow::Error::from)

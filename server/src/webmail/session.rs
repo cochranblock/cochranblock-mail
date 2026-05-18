@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::store::MailStore;
+use crate::webmail::rate_limit::RateLimiter;
 use axum::{
     extract::{FromRef, FromRequestParts},
     http::{StatusCode, request::Parts},
@@ -45,6 +46,7 @@ where
 pub struct AppState {
     pub store: Arc<MailStore>,
     pub config: Arc<Config>,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 impl FromRef<AppState> for Arc<MailStore> {

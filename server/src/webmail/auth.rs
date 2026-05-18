@@ -40,6 +40,10 @@ pub async fn login(
 ) -> impl IntoResponse {
     let store = &state.store;
 
+    if !state.rate_limiter.is_allowed(&body.username) {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(LoginResponse::Unauthorized)).into_response();
+    }
+
     let ok = match store.verify_password(&body.username, &body.password) {
         Ok(v) => v,
         Err(_) => {
@@ -52,8 +56,10 @@ pub async fn login(
     };
 
     if !ok {
+        state.rate_limiter.record_failure(&body.username);
         return (StatusCode::UNAUTHORIZED, Json(LoginResponse::Unauthorized)).into_response();
     }
+    state.rate_limiter.record_success(&body.username);
 
     let user = match store.get_user(&body.username) {
         Ok(u) => u,
@@ -284,6 +290,14 @@ pub async fn totp_verify(
     jar: CookieJar,
     Json(body): Json<TotpVerifyRequest>,
 ) -> impl IntoResponse {
+    if !state.rate_limiter.is_allowed(&body.partial_token) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiError::new("rate_limited", "too many failed attempts, try again later")),
+        )
+            .into_response();
+    }
+
     let partial = match state.store.consume_partial_session(&body.partial_token) {
         Ok(Some(p)) if !p.needs_setup => p,
         Ok(Some(_)) => {
@@ -309,23 +323,19 @@ pub async fn totp_verify(
         }
     };
 
-    let user = match state.store.get_user(&partial.username) {
-        Ok(u) => u,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError::new("store_error", "user not found")),
-            )
-                .into_response();
-        }
-    };
-
-    let secret = match &user.totp_secret {
-        Some(s) => s.clone(),
-        None => {
+    let secret = match state.store.get_totp_secret(&partial.username) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ApiError::new("not_enrolled", "TOTP not set up for this account")),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::new("store_error", "failed to read TOTP secret")),
             )
                 .into_response();
         }
@@ -344,6 +354,7 @@ pub async fn totp_verify(
 
     let valid = totp.check_current(&body.code).unwrap_or(false);
     if !valid {
+        state.rate_limiter.record_failure(&body.partial_token);
         return (
             StatusCode::UNAUTHORIZED,
             Json(ApiError::new("invalid_code", "TOTP code is incorrect")),
@@ -351,6 +362,7 @@ pub async fn totp_verify(
             .into_response();
     }
 
+    state.rate_limiter.record_success(&body.partial_token);
     issue_session(&state, &partial.username, jar).await
 }
 
@@ -375,7 +387,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::store::MailStore;
-    use crate::webmail::{mail, session::AppState};
+    use crate::webmail::{mail, rate_limit::RateLimiter, session::AppState};
     use axum::{Router, routing};
     use axum_test::TestServer;
     use shared::{LoginRequest, LoginResponse, TotpSetupResponse, TotpVerifyRequest};
@@ -395,13 +407,15 @@ mod tests {
             frontend_dist: PathBuf::from("/tmp"),
             session_ttl_secs: 86400,
             secure_cookies: false,
+            totp_encryption_key: None,
         })
     }
 
     fn build_server() -> (TestServer, Arc<MailStore>) {
         let store = Arc::new(MailStore::open_temp().unwrap());
         let config = test_config();
-        let state = AppState { store: Arc::clone(&store), config };
+        let rate_limiter = Arc::new(RateLimiter::new(5, 300, 900));
+        let state = AppState { store: Arc::clone(&store), config, rate_limiter };
         let app = Router::new()
             .route("/api/auth/login", routing::post(login))
             .route("/api/auth/totp/setup", routing::get(totp_setup))
