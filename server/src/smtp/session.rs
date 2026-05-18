@@ -1,3 +1,181 @@
+// ── Tests ─────────────────────────────────────────────────────────────────────
+//
+// Each test binds a random-port TcpListener, spawns an SmtpSession in a task,
+// connects a client, and drives the SMTP conversation explicitly.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::store::MailStore;
+    use std::{net::SocketAddr, path::PathBuf};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+
+    fn smtp_config() -> Arc<Config> {
+        Arc::new(Config {
+            domain: "cochranblock.test".to_string(),
+            smtp_port: 0,
+            smtp_submission_port: 0,
+            imap_port: 0,
+            http_port: 0,
+            tls_cert: PathBuf::from("/tmp"),
+            tls_key: PathBuf::from("/tmp"),
+            mail_dir: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.redb"),
+            frontend_dist: PathBuf::from("/tmp"),
+            session_ttl_secs: 86400,
+        })
+    }
+
+    async fn start() -> (SocketAddr, Arc<MailStore>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let store = Arc::new(MailStore::open_temp().unwrap());
+        let (s, c) = (Arc::clone(&store), smtp_config());
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            SmtpSession::new(stream, peer, c, s).run().await.ok();
+        });
+        (addr, store)
+    }
+
+    async fn connect(addr: SocketAddr) -> (BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf) {
+        let (r, w) = TcpStream::connect(addr).await.unwrap().into_split();
+        (BufReader::new(r), w)
+    }
+
+    async fn read_line(r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> String {
+        let mut s = String::new();
+        r.read_line(&mut s).await.unwrap();
+        s.trim_end_matches(|c: char| c == '\r' || c == '\n').to_string()
+    }
+
+    // Read multi-line SMTP response; returns the last (final) line.
+    async fn read_response(r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> String {
+        loop {
+            let line = read_line(r).await;
+            // Continuation lines have a '-' as the 4th character.
+            if line.len() < 4 || line.as_bytes()[3] != b'-' {
+                return line;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn banner_is_220_with_domain() {
+        let (addr, _store) = start().await;
+        let (mut r, _w) = connect(addr).await;
+        let banner = read_line(&mut r).await;
+        assert!(banner.starts_with("220 cochranblock.test"), "banner: {banner}");
+    }
+
+    #[tokio::test]
+    async fn ehlo_returns_250() {
+        let (addr, _store) = start().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await; // banner
+        w.write_all(b"EHLO client.example.com\r\n").await.unwrap();
+        let last = read_response(&mut r).await;
+        assert!(last.starts_with("250 "), "EHLO final line: {last}");
+    }
+
+    #[tokio::test]
+    async fn relay_denied_for_external_rcpt() {
+        let (addr, _store) = start().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await; // banner
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        w.write_all(b"MAIL FROM:<sender@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await; // 250
+        w.write_all(b"RCPT TO:<user@external.example.com>\r\n").await.unwrap();
+        let resp = read_line(&mut r).await;
+        assert!(resp.starts_with("550"), "expected relay-denial 550, got: {resp}");
+    }
+
+    #[tokio::test]
+    async fn full_delivery_stores_in_inbox() {
+        let (addr, store) = start().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await; // banner
+        w.write_all(b"EHLO client.example.com\r\n").await.unwrap();
+        read_response(&mut r).await;
+        w.write_all(b"MAIL FROM:<sender@example.com>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RCPT TO:<mailtest@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"DATA\r\n").await.unwrap();
+        read_line(&mut r).await; // 354
+        w.write_all(
+            b"From: sender@example.com\r\nTo: mailtest@cochranblock.test\r\n\
+              Subject: SMTP Integration\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
+              \r\nThis is the body.\r\n.\r\n",
+        )
+        .await
+        .unwrap();
+        let queued = read_line(&mut r).await;
+        assert!(queued.starts_with("250"), "DATA .: {queued}");
+
+        let (msgs, total) = store.list_messages("mailtest", "INBOX", 0).unwrap();
+        assert_eq!(total, 1, "message should be stored");
+        assert_eq!(msgs[0].subject, "SMTP Integration");
+    }
+
+    #[tokio::test]
+    async fn dot_stuffing_is_unstuffed_per_rfc5321() {
+        let (addr, store) = start().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await; // banner
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        w.write_all(b"MAIL FROM:<a@example.com>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RCPT TO:<dottest@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"DATA\r\n").await.unwrap();
+        read_line(&mut r).await;
+        // "..leading dot" — server must strip one leading dot
+        w.write_all(
+            b"Subject: Dot test\r\n\r\n..leading dot line\r\n.\r\n",
+        )
+        .await
+        .unwrap();
+        read_line(&mut r).await; // 250
+
+        let raw = store.fetch_raw("dottest", "INBOX", 1).unwrap().unwrap();
+        let body = String::from_utf8(raw).unwrap();
+        assert!(
+            body.contains(".leading dot line"),
+            "dot unstuffing should remove exactly one leading dot; body:\n{body}"
+        );
+        assert!(
+            !body.contains("..leading dot line"),
+            "double-dot should have been stripped to single; body:\n{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rset_clears_envelope_before_data() {
+        let (addr, store) = start().await;
+        let (mut r, mut w) = connect(addr).await;
+        read_line(&mut r).await; // banner
+        w.write_all(b"EHLO x\r\n").await.unwrap();
+        read_response(&mut r).await;
+        w.write_all(b"MAIL FROM:<a@example.com>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RCPT TO:<rsettest@cochranblock.test>\r\n").await.unwrap();
+        read_line(&mut r).await;
+        w.write_all(b"RSET\r\n").await.unwrap();
+        let rset = read_line(&mut r).await;
+        assert!(rset.starts_with("250"), "RSET: {rset}");
+
+        // No message should have been stored since we RSET before DATA.
+        let (_, total) = store.list_messages("rsettest", "INBOX", 0).unwrap();
+        assert_eq!(total, 0, "RSET should prevent delivery");
+    }
+}
+
 use crate::config::Config;
 use crate::smtp::command::SmtpCommand;
 use crate::store::MailStore;

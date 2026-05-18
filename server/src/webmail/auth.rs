@@ -368,6 +368,311 @@ pub async fn logout(
     (StatusCode::OK, removed, Json(serde_json::json!({"ok": true})))
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::store::MailStore;
+    use crate::webmail::{mail, session::AppState};
+    use axum::{Router, routing};
+    use axum_test::TestServer;
+    use shared::{LoginRequest, LoginResponse, TotpSetupResponse, TotpVerifyRequest};
+    use std::{path::PathBuf, sync::Arc};
+
+    fn test_config() -> Arc<Config> {
+        Arc::new(Config {
+            domain: "cochranblock.test".to_string(),
+            smtp_port: 0,
+            smtp_submission_port: 0,
+            imap_port: 0,
+            http_port: 0,
+            tls_cert: PathBuf::from("/tmp"),
+            tls_key: PathBuf::from("/tmp"),
+            mail_dir: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.redb"),
+            frontend_dist: PathBuf::from("/tmp"),
+            session_ttl_secs: 86400,
+        })
+    }
+
+    fn build_server() -> (TestServer, Arc<MailStore>) {
+        let store = Arc::new(MailStore::open_temp().unwrap());
+        let config = test_config();
+        let state = AppState { store: Arc::clone(&store), config };
+        let app = Router::new()
+            .route("/api/auth/login", routing::post(login))
+            .route("/api/auth/totp/setup", routing::get(totp_setup))
+            .route("/api/auth/totp/confirm", routing::post(totp_confirm))
+            .route("/api/auth/totp/verify", routing::post(totp_verify))
+            .route("/api/auth/session", routing::delete(logout))
+            .route("/api/mailboxes", routing::get(mail::list_mailboxes))
+            .with_state(state);
+        (TestServer::new(app), store)
+    }
+
+    fn session_token_from_response(resp: &axum_test::TestResponse) -> Option<String> {
+        resp.iter_headers_by_name("set-cookie").find_map(|v| {
+            let s = v.to_str().ok()?;
+            let pair = s.split(';').next()?;
+            let (k, v) = pair.split_once('=')?;
+            (k.trim() == SESSION_COOKIE).then(|| v.to_string())
+        })
+    }
+
+    /// Drive the full enrollment flow for a freshly created user; returns the session token.
+    async fn enroll(server: &TestServer, store: &MailStore, username: &str) -> String {
+        store.create_user(username, &format!("{username}@t.test"), "testpass").unwrap();
+
+        let partial_token = match server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: username.to_string(), password: "testpass".to_string() })
+            .await
+            .json::<LoginResponse>()
+        {
+            LoginResponse::TotpSetupRequired { partial_token } => partial_token,
+            other => panic!("expected TotpSetupRequired, got {other:?}"),
+        };
+
+        let setup: TotpSetupResponse = server
+            .get(&format!("/api/auth/totp/setup?partial_token={partial_token}"))
+            .await
+            .json();
+
+        let code = totp_rs::TOTP::new(
+            totp_rs::Algorithm::SHA1,
+            6, 1, 30,
+            totp_rs::Secret::Encoded(setup.secret_base32).to_bytes().unwrap(),
+            Some("cochranblock.test".to_string()),
+            format!("{username}@cochranblock.test"),
+        )
+        .unwrap()
+        .generate_current()
+        .unwrap();
+
+        let confirm = server
+            .post("/api/auth/totp/confirm")
+            .json(&TotpVerifyRequest { partial_token: setup.partial_token, code })
+            .await;
+        confirm.assert_status_ok();
+        session_token_from_response(&confirm).expect("session cookie not set after enrollment")
+    }
+
+    // ── login ──────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn login_wrong_password_is_401() {
+        let (server, store) = build_server();
+        store.create_user("alice", "alice@t.test", "correct").unwrap();
+        server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: "alice".into(), password: "wrong".into() })
+            .await
+            .assert_status_unauthorized();
+    }
+
+    #[tokio::test]
+    async fn login_unknown_user_is_401() {
+        let (server, _store) = build_server();
+        server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: "ghost".into(), password: "pass".into() })
+            .await
+            .assert_status_unauthorized();
+    }
+
+    #[tokio::test]
+    async fn login_new_user_returns_totp_setup_required() {
+        let (server, store) = build_server();
+        store.create_user("bob", "bob@t.test", "pass").unwrap();
+        let resp = server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: "bob".into(), password: "pass".into() })
+            .await;
+        resp.assert_status_ok();
+        assert!(matches!(resp.json::<LoginResponse>(), LoginResponse::TotpSetupRequired { .. }));
+    }
+
+    #[tokio::test]
+    async fn login_enrolled_user_returns_totp_required() {
+        let (server, store) = build_server();
+        store.create_user("carol", "carol@t.test", "pass").unwrap();
+        store.set_totp_secret("carol", "JBSWY3DPEHPK3PXP").unwrap();
+        let resp = server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: "carol".into(), password: "pass".into() })
+            .await;
+        resp.assert_status_ok();
+        assert!(matches!(resp.json::<LoginResponse>(), LoginResponse::TotpRequired { .. }));
+    }
+
+    // ── totp/setup ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn totp_setup_rejects_bogus_partial_token() {
+        let (server, _) = build_server();
+        server
+            .get("/api/auth/totp/setup?partial_token=not_real")
+            .await
+            .assert_status_unauthorized();
+    }
+
+    #[tokio::test]
+    async fn totp_setup_partial_token_is_single_use() {
+        let (server, store) = build_server();
+        store.create_user("dave", "dave@t.test", "pass").unwrap();
+        let partial_token = match server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: "dave".into(), password: "pass".into() })
+            .await
+            .json::<LoginResponse>()
+        {
+            LoginResponse::TotpSetupRequired { partial_token } => partial_token,
+            other => panic!("{other:?}"),
+        };
+        // First call consumes the partial token.
+        server
+            .get(&format!("/api/auth/totp/setup?partial_token={partial_token}"))
+            .await
+            .assert_status_ok();
+        // Second call with the same token must fail.
+        server
+            .get(&format!("/api/auth/totp/setup?partial_token={partial_token}"))
+            .await
+            .assert_status_unauthorized();
+    }
+
+    // ── totp/confirm ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn totp_confirm_wrong_code_is_401() {
+        let (server, store) = build_server();
+        store.create_user("eve", "eve@t.test", "pass").unwrap();
+        let partial_token = match server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: "eve".into(), password: "pass".into() })
+            .await
+            .json::<LoginResponse>()
+        {
+            LoginResponse::TotpSetupRequired { partial_token } => partial_token,
+            other => panic!("{other:?}"),
+        };
+        let setup: TotpSetupResponse = server
+            .get(&format!("/api/auth/totp/setup?partial_token={partial_token}"))
+            .await
+            .json();
+        server
+            .post("/api/auth/totp/confirm")
+            .json(&TotpVerifyRequest { partial_token: setup.partial_token, code: "000000".into() })
+            .await
+            .assert_status_unauthorized();
+    }
+
+    #[tokio::test]
+    async fn full_enrollment_issues_session_cookie() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "frank").await;
+        assert!(!token.is_empty());
+    }
+
+    // ── totp/verify ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn totp_verify_valid_code_issues_session() {
+        let (server, store) = build_server();
+        store.create_user("grace", "grace@t.test", "pass").unwrap();
+        let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"; // 32 chars = 20 bytes for SHA1
+        store.set_totp_secret("grace", secret).unwrap();
+
+        let partial_token = match server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: "grace".into(), password: "pass".into() })
+            .await
+            .json::<LoginResponse>()
+        {
+            LoginResponse::TotpRequired { partial_token } => partial_token,
+            other => panic!("{other:?}"),
+        };
+
+        let code = totp_rs::TOTP::new(
+            totp_rs::Algorithm::SHA1,
+            6, 1, 30,
+            totp_rs::Secret::Encoded(secret.to_string()).to_bytes().unwrap(),
+            Some("cochranblock.test".to_string()),
+            "grace@cochranblock.test".to_string(),
+        )
+        .expect("TOTP construction")
+        .generate_current()
+        .unwrap();
+
+        let resp = server
+            .post("/api/auth/totp/verify")
+            .json(&TotpVerifyRequest { partial_token, code })
+            .await;
+        resp.assert_status_ok();
+        assert!(session_token_from_response(&resp).is_some(), "no session cookie after verify");
+    }
+
+    #[tokio::test]
+    async fn totp_verify_wrong_code_is_401() {
+        let (server, store) = build_server();
+        store.create_user("henry", "henry@t.test", "pass").unwrap();
+        store.set_totp_secret("henry", "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP").unwrap();
+
+        let partial_token = match server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: "henry".into(), password: "pass".into() })
+            .await
+            .json::<LoginResponse>()
+        {
+            LoginResponse::TotpRequired { partial_token } => partial_token,
+            other => panic!("{other:?}"),
+        };
+        server
+            .post("/api/auth/totp/verify")
+            .json(&TotpVerifyRequest { partial_token, code: "000000".into() })
+            .await
+            .assert_status_unauthorized();
+    }
+
+    // ── session / logout ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn protected_route_without_cookie_is_401() {
+        let (server, _) = build_server();
+        server.get("/api/mailboxes").await.assert_status_unauthorized();
+    }
+
+    #[tokio::test]
+    async fn logout_invalidates_session() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "iris").await;
+        let cookie_hdr = format!("{SESSION_COOKIE}={token}");
+
+        // Session works before logout.
+        server
+            .get("/api/mailboxes")
+            .add_header("cookie", cookie_hdr.clone())
+            .await
+            .assert_status_ok();
+
+        // Logout.
+        server
+            .delete("/api/auth/session")
+            .add_header("cookie", cookie_hdr.clone())
+            .await
+            .assert_status_ok();
+
+        // Same token must now be rejected.
+        server
+            .get("/api/mailboxes")
+            .add_header("cookie", cookie_hdr)
+            .await
+            .assert_status_unauthorized();
+    }
+}
+
 // ── Shared: issue full session cookie ─────────────────────────────────────────
 
 async fn issue_session(

@@ -98,3 +98,38 @@ impl MailStore {
         Self::open(&path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn open_store() -> MailStore {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.redb");
+        std::mem::forget(dir);
+        MailStore::open(&path).unwrap()
+    }
+
+    #[test]
+    fn scratch_set_and_get_roundtrip() {
+        let store = open_store();
+        store.set_pending_totp_secret("__pending_totp__/tok123", "JBSWY3DPEHPK3PXP").unwrap();
+        let got = store.get_pending_totp_secret("__pending_totp__/tok123").unwrap();
+        assert_eq!(got.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+    }
+
+    #[test]
+    fn scratch_delete_removes_entry() {
+        let store = open_store();
+        store.set_pending_totp_secret("__pending_totp__/tokdel", "VALUE").unwrap();
+        store.delete_pending_totp_secret("__pending_totp__/tokdel").unwrap();
+        assert!(store.get_pending_totp_secret("__pending_totp__/tokdel").unwrap().is_none());
+    }
+
+    #[test]
+    fn scratch_get_nonexistent_returns_none() {
+        let store = open_store();
+        assert!(store.get_pending_totp_secret("key_that_was_never_set").unwrap().is_none());
+    }
+}

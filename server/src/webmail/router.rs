@@ -22,8 +22,8 @@ pub fn build(config: Arc<Config>, store: Arc<MailStore>) -> Router {
         .route("/mailboxes", get(mail::list_mailboxes))
         .route("/messages", get(mail::list_messages))
         .route("/messages", post(mail::send_message))
-        .route("/messages/:uid", get(mail::get_message))
-        .route("/messages/:uid", patch(mail::update_flags))
+        .route("/messages/{uid}", get(mail::get_message))
+        .route("/messages/{uid}", patch(mail::update_flags))
         .with_state(state);
 
     let frontend_dist = config.frontend_dist.clone();

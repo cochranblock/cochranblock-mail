@@ -260,6 +260,261 @@ fn extract_bodies(raw: &[u8]) -> (String, Option<String>) {
     }
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::store::MailStore;
+    use crate::webmail::{auth, session::{AppState, SESSION_COOKIE}};
+    use axum::{Router, routing};
+    use axum_test::TestServer;
+    use shared::{
+        FlagUpdate, LoginRequest, LoginResponse, MailboxInfo, MessageFull, MessagesPage,
+        SendRequest, TotpSetupResponse, TotpVerifyRequest,
+    };
+    use std::{path::PathBuf, sync::Arc};
+
+    fn test_config() -> Arc<Config> {
+        Arc::new(Config {
+            domain: "cochranblock.test".to_string(),
+            smtp_port: 0,
+            smtp_submission_port: 0,
+            imap_port: 0,
+            http_port: 0,
+            tls_cert: PathBuf::from("/tmp"),
+            tls_key: PathBuf::from("/tmp"),
+            mail_dir: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.redb"),
+            frontend_dist: PathBuf::from("/tmp"),
+            session_ttl_secs: 86400,
+        })
+    }
+
+    fn build_server() -> (TestServer, Arc<MailStore>) {
+        let store = Arc::new(MailStore::open_temp().unwrap());
+        let config = test_config();
+        let state = AppState { store: Arc::clone(&store), config };
+        let app = Router::new()
+            .route("/api/auth/login", routing::post(auth::login))
+            .route("/api/auth/totp/setup", routing::get(auth::totp_setup))
+            .route("/api/auth/totp/confirm", routing::post(auth::totp_confirm))
+            .route("/api/auth/totp/verify", routing::post(auth::totp_verify))
+            .route("/api/auth/session", routing::delete(auth::logout))
+            .route("/api/mailboxes", routing::get(list_mailboxes))
+            .route("/api/messages", routing::get(list_messages))
+            .route("/api/messages", routing::post(send_message))
+            .route("/api/messages/{uid}", routing::get(get_message))
+            .route("/api/messages/{uid}", routing::patch(update_flags))
+            .with_state(state);
+        (TestServer::new(app), store)
+    }
+
+    fn session_token_from_response(resp: &axum_test::TestResponse) -> Option<String> {
+        resp.iter_headers_by_name("set-cookie").find_map(|v| {
+            let s = v.to_str().ok()?;
+            let pair = s.split(';').next()?;
+            let (k, v) = pair.split_once('=')?;
+            (k.trim() == SESSION_COOKIE).then(|| v.to_string())
+        })
+    }
+
+    async fn enroll(server: &TestServer, store: &MailStore, username: &str) -> String {
+        store.create_user(username, &format!("{username}@t.test"), "testpass").unwrap();
+        store.ensure_standard_mailboxes(username).unwrap();
+
+        let partial_token = match server
+            .post("/api/auth/login")
+            .json(&LoginRequest { username: username.to_string(), password: "testpass".to_string() })
+            .await
+            .json::<LoginResponse>()
+        {
+            LoginResponse::TotpSetupRequired { partial_token } => partial_token,
+            other => panic!("{other:?}"),
+        };
+
+        let setup: TotpSetupResponse = server
+            .get(&format!("/api/auth/totp/setup?partial_token={partial_token}"))
+            .await
+            .json();
+
+        let code = totp_rs::TOTP::new(
+            totp_rs::Algorithm::SHA1,
+            6, 1, 30,
+            totp_rs::Secret::Encoded(setup.secret_base32).to_bytes().unwrap(),
+            Some("cochranblock.test".to_string()),
+            format!("{username}@cochranblock.test"),
+        )
+        .unwrap()
+        .generate_current()
+        .unwrap();
+
+        let resp = server
+            .post("/api/auth/totp/confirm")
+            .json(&TotpVerifyRequest { partial_token: setup.partial_token, code })
+            .await;
+        session_token_from_response(&resp).expect("no session after enrollment")
+    }
+
+    const TEST_MSG: &[u8] = b"From: sender@example.com\r\n\
+To: user@cochranblock.test\r\n\
+Subject: Hello world\r\n\
+Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Message body here.\r\n";
+
+    // ── mailboxes ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mailboxes_requires_auth() {
+        let (server, _) = build_server();
+        server.get("/api/mailboxes").await.assert_status_unauthorized();
+    }
+
+    #[tokio::test]
+    async fn list_mailboxes_returns_standard_boxes() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "alice").await;
+        let boxes: Vec<MailboxInfo> = server
+            .get("/api/mailboxes")
+            .add_header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .await
+            .json();
+        let names: Vec<&str> = boxes.iter().map(|b| b.name.as_str()).collect();
+        assert!(names.contains(&"INBOX"), "INBOX missing: {names:?}");
+        assert!(names.contains(&"Sent"), "Sent missing: {names:?}");
+        assert!(names.contains(&"Trash"), "Trash missing: {names:?}");
+    }
+
+    // ── messages ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_messages_empty_inbox() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "bob").await;
+        let page: MessagesPage = server
+            .get("/api/messages?mailbox=INBOX")
+            .add_header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .await
+            .json();
+        assert_eq!(page.total, 0);
+        assert!(page.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delivered_message_appears_in_inbox() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "carol").await;
+        store.deliver("carol", "INBOX", TEST_MSG).unwrap();
+
+        let page: MessagesPage = server
+            .get("/api/messages?mailbox=INBOX")
+            .add_header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .await
+            .json();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.messages[0].subject, "Hello world");
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_message_is_404() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "dave").await;
+        server
+            .get("/api/messages/99999?mailbox=INBOX")
+            .add_header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .await
+            .assert_status_not_found();
+    }
+
+    #[tokio::test]
+    async fn get_message_auto_marks_as_read() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "eve").await;
+        let uid = store.deliver("eve", "INBOX", TEST_MSG).unwrap();
+
+        // Fetching the message triggers the seen side-effect.
+        server
+            .get(&format!("/api/messages/{uid}?mailbox=INBOX"))
+            .add_header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .await
+            .assert_status_ok();
+
+        // Verify via store — the handler returns pre-update meta but must persist the flag.
+        let meta = store.fetch_meta("eve", "INBOX", uid).unwrap().unwrap();
+        assert!(meta.is_seen(), "GET /messages/:uid must persist SEEN flag in store");
+    }
+
+    #[tokio::test]
+    async fn send_message_saves_copy_in_sent() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "frank").await;
+
+        server
+            .post("/api/messages")
+            .add_header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .json(&SendRequest {
+                to: vec!["nobody@external.example".to_string()],
+                cc: vec![],
+                subject: "Send test".to_string(),
+                body: "Body text.".to_string(),
+                in_reply_to: None,
+            })
+            .await
+            .assert_status_ok();
+
+        let (msgs, total) = store.list_messages("frank", "Sent", 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(msgs[0].subject, "Send test");
+    }
+
+    #[tokio::test]
+    async fn send_to_local_user_delivers_to_their_inbox() {
+        let (server, store) = build_server();
+        let sender_token = enroll(&server, &store, "grace").await;
+        // Create recipient without going through enrollment (store-direct).
+        store.create_user("harry", "harry@cochranblock.test", "pass").unwrap();
+        store.ensure_standard_mailboxes("harry").unwrap();
+
+        server
+            .post("/api/messages")
+            .add_header("cookie", format!("{SESSION_COOKIE}={sender_token}"))
+            .json(&SendRequest {
+                to: vec!["harry@cochranblock.test".to_string()],
+                cc: vec![],
+                subject: "Local delivery".to_string(),
+                body: "Hi Harry".to_string(),
+                in_reply_to: None,
+            })
+            .await
+            .assert_status_ok();
+
+        let (msgs, total) = store.list_messages("harry", "INBOX", 0).unwrap();
+        assert_eq!(total, 1, "local recipient should receive a copy");
+        assert_eq!(msgs[0].subject, "Local delivery");
+    }
+
+    #[tokio::test]
+    async fn update_flags_marks_starred_and_persists() {
+        let (server, store) = build_server();
+        let token = enroll(&server, &store, "iris").await;
+        let uid = store.deliver("iris", "INBOX", TEST_MSG).unwrap();
+
+        server
+            .patch(&format!("/api/messages/{uid}"))
+            .add_header("cookie", format!("{SESSION_COOKIE}={token}"))
+            .json(&FlagUpdate { mailbox: "INBOX".to_string(), seen: None, starred: Some(true), deleted: None })
+            .await
+            .assert_status_ok();
+
+        let meta = store.fetch_meta("iris", "INBOX", uid).unwrap().unwrap();
+        assert!(meta.is_starred(), "STARRED flag should be set after PATCH");
+    }
+}
+
 fn find_body_part(msg: &mailparse::ParsedMail, mime: &str) -> Option<String> {
     if msg.ctype.mimetype.eq_ignore_ascii_case(mime) {
         return msg.get_body().ok();
