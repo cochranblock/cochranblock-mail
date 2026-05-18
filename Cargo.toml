@@ -1,0 +1,53 @@
+# Unlicense — cochranblock.org
+# Contributors: GotEmCoach, Claude Sonnet 4.6
+
+[package]
+name = "cochranblock-mail"
+version = "0.1.0"
+edition = "2024"
+authors = ["Michael Cochran <mcochran@cochranblock.org>"]
+description = "Sovereign SMTP/IMAP mail server for cochranblock.org. Single binary, zero cloud."
+license = "Unlicense"
+repository = "https://github.com/cochranblock/cochranblock-mail"
+homepage = "https://cochranblock.org"
+keywords = ["email", "smtp", "imap", "mail-server", "zero-cloud"]
+categories = ["network-programming", "email"]
+
+[[bin]]
+name = "cochranblock-mail"
+path = "src/bin/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+redb = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+dotenvy = "0.15"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+base64 = "0.21"
+uuid = { version = "1", features = ["v4"] }
+mailparse = "0.15"
+quoted_printable = "0.5"
+rcgen = "0.14"
+anyhow = "1"
+zstd = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+overflow-checks = false
+debug = false
+incremental = false
