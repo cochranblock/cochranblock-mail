@@ -156,7 +156,7 @@ Release check: clean
 | 2026-05-18 | `79acd3a` | Brand: SDVOSB Certified badge + local SVG refs |
 | 2026-05-18 | `8c12bb0` | Add e2e integration test: SMTP→IMAP→HTTP TOTP flow with Chromium screenshots |
 | 2026-05-18 | `57f8151` | Update ARTIFACTS.md: A11 spam engine, A12 e2e test, 163 tests, 3 missing commits |
-| 2026-05-18 | `TBD`     | Update TIMELINE.md: full 2026-05-18 session record (audit, hardening, spam, e2e) |
+| 2026-05-18 | `670df3d` | Update TOI + POA: full 2026-05-18 session record (audit, hardening, spam, e2e) |
 
 ---
 
