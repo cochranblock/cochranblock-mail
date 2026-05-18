@@ -147,11 +147,11 @@ pub fn MessageList(
                             {data.total}
                         </span>
                         <button
-                            disabled=move || page.get() == 0
+                            disabled={move || page.get() == 0}
                             on:click=move |_| page.update(|p| *p = p.saturating_sub(1))
                         >"‹"</button>
                         <button
-                            disabled=move || page.get() + 1 >= total_pages
+                            disabled={move || page.get() + 1 >= total_pages}
                             on:click=move |_| page.update(|p| *p += 1)
                         >"›"</button>
                     </div>

@@ -1,5 +1,7 @@
 use crate::store::MailStore;
 use crate::webmail::{auth, mail, rate_limit::RateLimiter, session::AppState};
+#[cfg(feature = "tests")]
+use crate::webmail::session::SESSION_COOKIE;
 use axum::{
     Router,
     extract::Request,
@@ -39,11 +41,36 @@ pub fn build(config: Arc<crate::config::Config>, store: Arc<MailStore>) -> Route
         .route("/messages/{uid}", patch(mail::update_flags))
         .with_state(state);
 
-    Router::new()
+    let app = Router::new()
         .nest("/api", api)
         .fallback(serve_asset)
         .layer(middleware::from_fn(hsts))
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive());
+
+    #[cfg(feature = "tests")]
+    let app = app.route("/test/inject-session", get(inject_session));
+
+    app
+}
+
+/// Test-only: sets the session cookie then redirects to the SPA inbox.
+/// Allows headless chromium to screenshot the webmail as an authenticated user.
+#[cfg(feature = "tests")]
+async fn inject_session(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let token = params.get("token").cloned().unwrap_or_default();
+    let redirect = params.get("redirect").cloned().unwrap_or_else(|| "/".to_string());
+    let mut headers = axum::http::HeaderMap::new();
+    if let Ok(v) = axum::http::HeaderValue::from_str(
+        &format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly")
+    ) {
+        headers.insert(axum::http::header::SET_COOKIE, v);
+    }
+    if let Ok(v) = axum::http::HeaderValue::try_from(redirect) {
+        headers.insert(axum::http::header::LOCATION, v);
+    }
+    (StatusCode::FOUND, headers)
 }
 
 async fn serve_asset(uri: axum::http::Uri) -> impl IntoResponse {

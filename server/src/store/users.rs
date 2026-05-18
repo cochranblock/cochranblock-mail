@@ -91,7 +91,7 @@ impl MailStore {
         let val = table
             .get(username)?
             .ok_or_else(|| StoreError::NotFound(username.to_string()))?;
-        Ok(dec(val.value())?)
+        dec(val.value())
     }
 
     pub fn verify_password(&self, username: &str, password: &str) -> Result<bool, StoreError> {

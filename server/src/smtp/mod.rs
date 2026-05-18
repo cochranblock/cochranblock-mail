@@ -1,5 +1,5 @@
 mod listener;
-mod session;
+pub mod session;
 mod command;
 
 pub use listener::SmtpListener;

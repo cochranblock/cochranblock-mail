@@ -3,7 +3,7 @@ use crate::components::totp_setup::TotpSetupPage;
 use crate::state::AuthState;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::hooks::use_navigate;
+use leptos_router::hooks::{use_navigate, use_query_map};
 use shared::LoginResponse;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +24,15 @@ pub fn LoginPage() -> impl IntoView {
     let totp_code = RwSignal::new(String::new());
     let error = RwSignal::new(Option::<String>::None);
     let loading = RwSignal::new(false);
+
+    // Allow deep-linking into the TOTP verify step via ?partial_token=TOKEN.
+    let query = use_query_map();
+    Effect::new(move |_| {
+        let token = query.with(|q| q.get("partial_token").map(|s| s.to_string())).unwrap_or_default();
+        if !token.is_empty() {
+            step.set(LoginStep::TotpVerify { partial_token: token });
+        }
+    });
 
     view! {
         <div class="login-page">

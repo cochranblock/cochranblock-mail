@@ -180,33 +180,33 @@ fn parse_item_list(s: &str) -> Option<Vec<FetchItem>> {
     let tokens = tokenize(s);
     let mut pos = 0;
     // Macro expansions
-    if tokens.len() == 1 {
-        if let Token::Atom(ref a) = tokens[0] {
-            return Some(match a.as_str() {
-                "ALL" => vec![
-                    FetchItem::Flags,
-                    FetchItem::InternalDate,
-                    FetchItem::Rfc822Size,
-                    FetchItem::Envelope,
-                ],
-                "FAST" => vec![
-                    FetchItem::Flags,
-                    FetchItem::InternalDate,
-                    FetchItem::Rfc822Size,
-                ],
-                "FULL" => vec![
-                    FetchItem::Flags,
-                    FetchItem::InternalDate,
-                    FetchItem::Rfc822Size,
-                    FetchItem::Envelope,
-                    FetchItem::BodyStructure,
-                ],
-                _ => {
-                    let item = parse_one_item(&tokens, &mut pos)?;
-                    vec![item]
-                }
-            });
-        }
+    if tokens.len() == 1
+        && let Token::Atom(ref a) = tokens[0]
+    {
+        return Some(match a.as_str() {
+            "ALL" => vec![
+                FetchItem::Flags,
+                FetchItem::InternalDate,
+                FetchItem::Rfc822Size,
+                FetchItem::Envelope,
+            ],
+            "FAST" => vec![
+                FetchItem::Flags,
+                FetchItem::InternalDate,
+                FetchItem::Rfc822Size,
+            ],
+            "FULL" => vec![
+                FetchItem::Flags,
+                FetchItem::InternalDate,
+                FetchItem::Rfc822Size,
+                FetchItem::Envelope,
+                FetchItem::BodyStructure,
+            ],
+            _ => {
+                let item = parse_one_item(&tokens, &mut pos)?;
+                vec![item]
+            }
+        });
     }
     // Parenthesized or bare list
     let items = if tokens.first() == Some(&Token::LParen) {
@@ -404,7 +404,7 @@ pub fn format_flags(f: u8) -> String {
 fn build_envelope(meta: &shared::MessageMeta) -> String {
     let date = format!("\"{}\"", meta.date.format("%a, %d %b %Y %H:%M:%S +0000"));
     let subject = nstring(&meta.subject);
-    let from = addr_list(&[meta.from.clone()]);
+    let from = addr_list(std::slice::from_ref(&meta.from));
     let to = addr_list(&meta.to);
 
     // ENVELOPE format (RFC 3501):
@@ -486,7 +486,7 @@ fn extract_body(raw: &[u8]) -> &[u8] {
     &[] // no body
 }
 
-fn extract_specific_headers<'a>(raw: &'a [u8], fields: &[String]) -> Vec<u8> {
+fn extract_specific_headers(raw: &[u8], fields: &[String]) -> Vec<u8> {
     let header_bytes = extract_header(raw);
     let header_str = String::from_utf8_lossy(header_bytes);
     let mut out = String::new();

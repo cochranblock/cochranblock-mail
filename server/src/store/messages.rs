@@ -278,10 +278,10 @@ impl MailStore {
             let mut msg_table = tx.open_table(MESSAGES)?;
 
             for (key, _was_seen) in &to_delete {
-                if let Some(uid_hex) = key.split('/').last() {
-                    if let Ok(uid) = u64::from_str_radix(uid_hex, 16) {
-                        expunged.push(uid);
-                    }
+                if let Some(uid_hex) = key.split('/').next_back()
+                    && let Ok(uid) = u64::from_str_radix(uid_hex, 16)
+                {
+                    expunged.push(uid);
                 }
                 meta_table.remove(key.as_str())?;
                 msg_table.remove(key.as_str())?;
