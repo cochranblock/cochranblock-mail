@@ -2,7 +2,7 @@
 # Contributors: GotEmCoach, Claude Sonnet 4.6
 
 [package]
-name = "shared"
+name = "cochranblock-mail-shared"
 description = "Shared API types for cochranblock-mail server and frontend"
 keywords = ["email", "api", "types"]
 categories = ["network-programming", "email"]

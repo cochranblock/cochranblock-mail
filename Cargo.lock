@@ -625,6 +625,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "cochranblock-mail-shared",
  "dotenvy",
  "mailparse",
  "quoted_printable",
@@ -636,7 +637,6 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
- "shared",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -655,6 +655,7 @@ dependencies = [
 name = "cochranblock-mail-frontend"
 version = "0.1.0"
 dependencies = [
+ "cochranblock-mail-shared",
  "console_error_panic_hook",
  "gloo-net 0.7.0",
  "js-sys",
@@ -662,11 +663,19 @@ dependencies = [
  "leptos_router",
  "serde",
  "serde_json",
- "shared",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+]
+
+[[package]]
+name = "cochranblock-mail-shared"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2942,15 +2951,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
-]
-
-[[package]]
-name = "shared"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
 ]
 
 [[package]]

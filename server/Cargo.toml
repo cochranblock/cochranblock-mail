@@ -18,7 +18,7 @@ name = "cochranblock-mail"
 path = "src/bin/main.rs"
 
 [dependencies]
-shared.workspace = true
+shared = { package = "cochranblock-mail-shared", path = "../shared", version = "0.1" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
